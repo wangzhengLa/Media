@@ -1,0 +1,41 @@
+{
+    "unix_sock_path": "/tmp/ubus.sock",
+    "captrue_cfg": [
+        {
+            "width": 640,
+            "height": 480,
+            "fps": 20,
+            "device_index": 0,
+            "camera_type": "sc200ai",
+            "stream_property": "living",
+            "cam_id": 0,
+            "isp_path": "mainpath",
+            "iq_file": "/etc/iqfiles/sc200ai.json"
+        },
+        {
+            "width": 640,
+            "height": 480,
+            "fps": 10,
+            "device_index": 8,
+            "camera_type": "sc200ai",
+            "stream_property": "ai",
+            "cam_id": 0,
+            "isp_path": "selfpath",
+            "iq_file": "/etc/iqfiles/sc200ai.json"
+        }
+    ],
+    "encoder_cfg": {
+        "width": 640,
+        "height": 480,
+        "init_qp": 30,
+        "min_qp": 10,
+        "max_qp": 50,
+        "init_bps": 1024000,
+        "min_bps": 512000,
+        "max_bps": 2048000,
+        "gop": 60,
+        "max_fps": 20,
+        "crop_x": 0,
+        "crop_y": 0
+    }
+}

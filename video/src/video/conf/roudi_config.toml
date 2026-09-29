@@ -1,0 +1,14 @@
+[general]
+version = 1
+
+[[segment]]
+
+# H264 帧内存池
+[[segment.mempool]]
+size = 131080  
+count = 2      
+
+# NV12 帧内存池
+[[segment.mempool]]
+size = 460816  
+count = 2    

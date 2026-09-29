@@ -1,0 +1,7 @@
+struct AudioData {
+    long long timestamp;          // 时间戳，用于同步
+    long sample_rate;             // 采样率，如 44100
+    long channels;                // 声道数，如 2
+    long samples;                 // 本次数据包含的采样点数
+    sequence<octet> audio_data;   // 音频数据（PCM 字节流）
+};

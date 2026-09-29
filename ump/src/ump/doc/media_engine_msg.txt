@@ -1,0 +1,59 @@
+---------------------国际国内视频接收wifihandler消息---------------------
+// 开启视频管家
+{
+	"data": {
+		"channel": "production-ece80bb0-6dda-4746-ba6b-03724e d6e0e1 ",
+		"credentials": {
+			"AccessKeyId": "ASIAYDIW7ML5SPJHV5AI",
+			"Expiration": "2023-03-30T02:27:28.000Z",
+			"SecretAccessKey": "sBhpQlc8TUL55J00KZCBZ1f9YWGopevK3DmTjndM",
+			"SessionToken": "IQoJb3JpZ2luX2VjEJL//////////wEaCXVzLXdlc3QtMiJGMEQCIFoyUGDOqA9lL/44l+...sciVjbCxA+rAxRnCq0cKwqL4Lg1KzpHr8mTDdMH+yXMj8M7ppqqRHQaAQKTSCYg==",
+			"TtlSec": 3600
+		},
+		"region": "us-west-2"
+	},
+	"todo": "startAkvsVideo"
+}
+
+// 双向语音开关，1：代表开启双向语音 0：代表关闭双向语音
+{
+	"data": {
+		"clientId": "fjvclkg3aaff7cb8-GLB492f0dbG5 ",
+		"state ": 0
+	},
+	"todo ": "setAudioCallState "
+}
+
+// 获取双向语音状态开关
+{
+	"todo": "getAudioCallState"
+}
+
+// 代表app收到h264关键帧，我们播放视频已打开语音
+{
+	"todo": "videoOpened"
+}
+
+// 设置视频提醒方式 1: voice 2: light
+{
+	"state":2,
+	"todo":"setVideoRemind"
+}
+
+// 获取视频提醒方式
+{
+	"todo":"getVideoRemind"
+}
+
+// 获取飞燕信息
+{
+	"todo":"getFeiyanInfo"
+}
+
+// 获取token信息
+{
+	"todo":"getBindToken"
+}
+
+
+

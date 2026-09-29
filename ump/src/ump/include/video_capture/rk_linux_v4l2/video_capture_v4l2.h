@@ -1,0 +1,65 @@
+#ifndef VIDEO_CAPTURE_V4L2_H_
+#define VIDEO_CAPTURE_V4L2_H_
+
+#include <stddef.h>
+#include <stdint.h>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include "video_capture_defines.h"
+#include "video_capture_impl.h"
+
+namespace ecovacs
+{
+    namespace videocapturemodule
+    {
+        class VideoCaptureModuleV4L2 : public VideoCaptureImpl
+        {
+        public:
+            VideoCaptureModuleV4L2();
+            ~VideoCaptureModuleV4L2() override;
+            int32_t Init(const char *deviceUniqueId);
+            int32_t Init(int32_t deviceIndex);
+            int32_t StartCapture(const VideoCaptureCapability &capability) override;
+            int32_t StopCapture() override;
+            bool CaptureStarted() override;
+            int32_t CaptureSettings(VideoCaptureCapability &settings) override;
+
+        private:
+            enum
+            {
+                kNoOfV4L2Bufffers = 4
+            };
+
+            static void CaptureThread(void *);
+            bool CaptureProcess();
+            bool AllocateVideoBuffers();
+            bool DeAllocateVideoBuffers();
+
+            std::thread _captureThread;
+            std::mutex capture_lock_;
+            bool quit_;
+            int32_t _deviceId;
+            int32_t _deviceFd;
+            uint32_t _deviceCaps;
+
+            int32_t _buffersAllocatedByDevice;
+            int32_t _currentWidth;
+            int32_t _currentHeight;
+            int32_t _currentFrameRate;
+            int32_t _numPlanes;
+            bool _captureStarted;
+            video_common::VideoType _captureVideoType;
+            struct Buffer
+            {
+                void *start;
+                size_t length;
+            };
+            Buffer *_pool;
+        };
+
+    } // namespace videocapturemodule
+
+} // namespace ecovacs
+
+#endif // VIDEO_CAPTURE_V4L2_H_
