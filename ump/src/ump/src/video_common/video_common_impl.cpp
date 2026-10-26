@@ -34,24 +34,6 @@ namespace ecovacs
             case kNV21:
                 VideoFrameBuffer(width, height, width, width_ + width_ % 2);
                 break;
-            case kYUY2:
-                // packed YUYV: 单平面，stride = width * 2，总大小 = stride * height
-                stride_y_ = width_ * 2;
-                stride_u_ = 0;
-                stride_v_ = 0;
-                stride_uv_ = 0;
-                data_y_ = (uint8_t *)IntelliUtilMalloc(sizeof(uint8_t) * stride_y_ * height_);
-                data_uv_ = nullptr;
-                break;
-            case kRGB24:
-                // packed RGB24: 单平面，stride = width * 3，总大小 = stride * height
-                stride_y_ = width_ * 3;
-                stride_u_ = 0;
-                stride_v_ = 0;
-                stride_uv_ = 0;
-                data_y_ = (uint8_t *)IntelliUtilMalloc(sizeof(uint8_t) * stride_y_ * height_);
-                data_uv_ = nullptr;
-                break;
             default:
                 break;
             }

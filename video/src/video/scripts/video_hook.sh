@@ -69,6 +69,14 @@ stop_libpeer_push() {
 	${UBUS_CMD} stop_libpeer_push
 }
 
+start_webrtc_push() {
+	${UBUS_CMD} start_webrtc_push
+}
+
+stop_webrtc_push() {
+	${UBUS_CMD} stop_webrtc_push
+}
+
 start_jpeg_pub() {
 	${UBUS_CMD} start_jpeg_pub
 }
@@ -101,6 +109,8 @@ show_usage() {
 	echo "  stop_rtsp_push           - Stop video rtsp push"
 	echo "  start_libpeer_push       - Start video libpeer(WebRTC) push"
 	echo "  stop_libpeer_push        - Stop video libpeer(WebRTC) push"
+	echo "  start_webrtc_push       - Start video official WebRTC push"
+	echo "  stop_webrtc_push        - Stop video official WebRTC push"
 	echo "  start_jpeg_pub                - Start JPEG publishing"
 	echo "  stop_jpeg_pub                 - Stop JPEG publishing"
 	echo "  start_qr_identify             - Start QR code identification"
@@ -150,6 +160,12 @@ case "$1" in
 		;;
 	stop_libpeer_push)
 		stop_libpeer_push
+		;;
+	start_webrtc_push)
+		start_webrtc_push
+		;;
+	stop_webrtc_push)
+		stop_webrtc_push
 		;;
 	start_jpeg_pub)
 		start_jpeg_pub

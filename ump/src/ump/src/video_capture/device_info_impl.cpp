@@ -141,12 +141,7 @@ namespace ecovacs
                                             capability.width == requested.width &&
                                             capability.maxFPS >= requested.maxFPS)
                                         {
-                                            // 优先选 videoType 匹配的；若当前最佳不匹配而当前匹配，则替换
-                                            if (capability.videoType == requested.videoType ||
-                                                bestVideoType != requested.videoType)
-                                            {
-                                                bestformatIndex = tmp;
-                                            }
+                                            bestformatIndex = tmp;
                                         }
                                     }
                                     else // Better frame rate

@@ -86,7 +86,9 @@ namespace ecovacs
 	void AllWinnerEncoderImpl::SetRates(const video_common::RateControlParameters &parameters)
 	{
 		if (video_common::kVideoCodecH264 == codec_settings.codecType)
-			mpi_enc_handle_.allwinner_adjust_bitrate(parameters.target_bitrate * 1000);
+			// allwinner_adjust_bitrate internally multiplies by 1000 and
+			// feeds bps to cedarc, so pass kbps here.
+			mpi_enc_handle_.allwinner_adjust_bitrate(parameters.target_bitrate / 1000);
 		return;
 	}
 

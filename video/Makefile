@@ -1,15 +1,44 @@
 include ../platform/config.mk
 PROJ_NAME = video
-PROJ_VER = 1
-PROJ_REL = 2
 GIT_BRANCH = master
-PKG_NAME = $(PROJ_NAME)-$(PROJ_VER)-$(PROJ_REL)-$(HOST_ARCH)-$(FP_FLAG).pkg.tar.xz
-SRC_NAME = $(PROJ_NAME)-$(PROJ_VER).tar.xz
-PROJ_NAME_VER = $(PROJ_NAME)-$(PROJ_VER)
+GIT_VER := $(shell cat VERSION)
+PROJ_VER = $(GIT_BRANCH)
+PROJ_REL = 27
+PKG_NAME = $(PROJ_NAME)-$(PROJ_VER)-$(GIT_VER)-$(PROJ_REL)-$(HOST_ARCH)-$(FP_FLAG).pkg.tar.xz
+PROJECT = ${PROJECT_TYPE}
+
 PWD := $(shell pwd)
 default: build
 
-fetchSrc:
+# 依赖列表： "目录名:目标"
+DEPS = \
+    alsa-lib:fetchPkg \
+    boost:fetchPkg \
+    cJSON:fetchPkg \
+    json-c:fetchPkg \
+    libAWIspApi:fetchPkg \
+    libbacktrace:fetchPkg \
+    libcedarc:fetchPkg \
+    libjpeg-turbo:fetchPkg \
+    libubox:fetchPkg \
+    libwebsockets:fetchPkg \
+    libyuv:fetchPkg \
+    rtspserver:fetchPkg \
+    speexdsp:fetchPkg \
+    ubus:fetchPkg \
+    ump:fetchPkg \
+    webrtc-audio-processing:fetchPkg \
+    zlog:fetchPkg
+
+fetchDeps:
+	@for dep in $(DEPS); do \
+		dir=$$(echo $$dep | cut -d: -f1); \
+		target=$$(echo $$dep | cut -d: -f2); \
+		echo ">>> Entering ../$$dir and running make $$target"; \
+		$(MAKE) -C ../$$dir $$target || echo "Warning: Failed to fetch $$dir (maybe already exists?)"; \
+	done
+
+fetchSrc:fetchDeps
 	@if [ -d src ]; then \
 		echo "Error: src directory exists."; \
 		exit 1; \
@@ -22,17 +51,18 @@ configure:
 	mkdir build && \
 	cd build && \
 	cmake ../ \
-	-DUSE_AM311X_PLATFORM=ON \
-	-DUSE_LIVE555_RTSP=OFF \
-	-DENABLE_ISP=OFF \
+	-DUSE_AW_PLATFORM=ON \
 	-DENABLE_WEBSOCKETS=ON \
+	-DUSE_LIVE555_RTSP=ON \
+	-DENABLE_WEBRTC=ON \
 	-DCMAKE_INSTALL_PREFIX=$(PLATFORM_DIR)/../$(PROJ_NAME)/install/root \
 	-DCMAKE_SYSTEM_NAME=Linux \
 	-DCMAKE_C_COMPILER=$(CROSS_COMPILE)gcc  \
-	-DCMAKE_CXX_COMPILER=$(CROSS_COMPILE)g++ 
+	-DCMAKE_CXX_COMPILER=$(CROSS_COMPILE)g++
          
 build:
 	$(MAKE) -C src/$(PROJ_NAME)/build -j 4
+	rm -fr install
 
 clean:
 	$(MAKE) -C src/$(PROJ_NAME)/build clean
@@ -40,7 +70,11 @@ clean:
 distclean:
 	$(MAKE) -C src/$(PROJ_NAME)/build clean
 
-install:
+update_git_ver:
+	NEW_HASH=$$(git -C src/$(PROJ_NAME) rev-parse --short HEAD); \
+	echo "$$NEW_HASH" > VERSION;
+
+install:update_git_ver build
 	-$(MAKE) -C src/$(PROJ_NAME)/build install
 	rm -rf install/root/usr/lib/pkgconfig
 	
@@ -100,10 +134,17 @@ fetchPkg:
 	$(call fetchPkgTemplate,$(PKG_NAME),install/root)
 
 put-pkg:
-	curl -u "${JFROG_USERNAME}:${JFROG_PASSWORD}" -T "${PKG_NAME}" "${JFROG_ARTIFACTORY_BASE_TAR}/${BOARD}/" --connect-timeout 10 --max-time 300
-
-push-src:
-	curl -u "${JFROG_USERNAME}:${JFROG_PASSWORD}" -T "${SRC_NAME}" "${JFROG_ARTIFACTORY_OPEN_SOURCE}/${BOARD}/" --connect-timeout 10 --max-time 300
+	@HTTP_CODE=$$(curl -s -o /dev/null -w "%{http_code}" -u "${JFROG_USERNAME}:${JFROG_PASSWORD}" -I "${JFROG_ARTIFACTORY_BASE_TAR}/${BOARD}/${PKG_NAME}"); \
+	if [ "$$HTTP_CODE" -eq 200 ]; then \
+		echo "error: [${PKG_NAME}] existence in jfrog, cannot upload overwriting!!!"; \
+		exit 1; \
+	else \
+		curl -u "${JFROG_USERNAME}:${JFROG_PASSWORD}" -T "${PKG_NAME}" "${JFROG_ARTIFACTORY_BASE_TAR}/${BOARD}/" --connect-timeout 10 --max-time 300; \
+		if [ $$? -ne 0 ]; then \
+			echo "upload fail，please check"; \
+			exit 1; \
+		fi; \
+	fi
 
 crossInstall:
 	mkdir -p $(CROSS_INSTALL_USR)/

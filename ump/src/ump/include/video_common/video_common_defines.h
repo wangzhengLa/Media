@@ -80,8 +80,6 @@ namespace ecovacs
             kNV12,
             kNV21,
             kI444,
-            kYUY2,
-            kRGB24,
             kBUTT,
         };
 

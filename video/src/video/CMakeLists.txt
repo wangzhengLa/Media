@@ -23,13 +23,13 @@ add_compile_options(-Wno-attributes)
 # ============================================================================
 option(USE_AW_PLATFORM "use aw platform flag" OFF)
 option(USE_RK_PLATFORM "use rk platform flag" OFF)
-option(USE_AM311X_PLATFORM "use am311x platform flag" OFF)
 option(ENABLE_ROS2 "enable ros2_humble flag" OFF)
 option(ENABLE_WEBSOCKETS "enable websockets flag" OFF)
 option(ENABLE_ICEORYX "enable iceoryx flag" OFF)
 option(ENABLE_ISP "enable ISP management" OFF)
 option(USE_LIVE555_RTSP "Use live555-based RTSP push (src/rtsp self-adapted wrapper) instead of xop" ON)
 option(ENABLE_LIBPEER "enable libpeer WebRTC push" OFF)
+option(ENABLE_WEBRTC "enable official transport-only trimmed WebRTC push" OFF)
 
 # ============================================================================
 # 平台特定定义
@@ -40,9 +40,6 @@ if(USE_RK_PLATFORM)
 elseif(USE_AW_PLATFORM)
     add_definitions(-DAW_PLATFORM)
     set(PLATFORM_NAME "AW")
-elseif(USE_AM311X_PLATFORM)
-    add_definitions(-DAM311X_PLATFORM)
-    set(PLATFORM_NAME "AM311X")
 endif()
 
 # ========== ISP 功能启用检查 ==========
@@ -94,6 +91,13 @@ if(ENABLE_LIBPEER)
     list(APPEND THIRD_PARTY_LIBS libpeer)
 endif()
 
+# 官方裁剪栈 WebRTC 默认不启用（静态库自带 include 布局，单独配置）
+if(ENABLE_WEBRTC)
+    set(WEBRTC_INSTALL ${THIRD_PARTY_BASE}/webrtc/install/root/usr)
+    include_directories(${WEBRTC_INSTALL}/include/webrtc)
+    file(GLOB WEBRTC_RLIBS ${WEBRTC_INSTALL}/lib/webrtc_rlib/*.rlib)
+endif()
+
 if(USE_RK_PLATFORM)
     list(APPEND THIRD_PARTY_LIBS mpp rockit librga)
     # 只有启用 ISP 时才添加 camera_engine_rkaiq
@@ -103,9 +107,6 @@ if(USE_RK_PLATFORM)
 elseif(USE_AW_PLATFORM)
     # AW 平台特有库
     list(APPEND THIRD_PARTY_LIBS libcedarc libAWIspApi)
-elseif(USE_AM311X_PLATFORM)
-    # libvideo_codec.so → libmhal.so → libvpu.so，需直接链接
-    list(APPEND THIRD_PARTY_LIBS mhal vpulib)
 endif()
 
 # ============================================================================
@@ -297,6 +298,21 @@ else()
     message(STATUS "Libpeer support: OFF")
 endif()
 
+# WebRTC push now backed by ump's webrtc_transport component (which links
+# libwebrtc.a internally). video only needs the thin wrapper + ump lib.
+if(ENABLE_WEBRTC)
+    add_definitions(-DENABLE_WEBRTC)
+    set(WEBRTC_SOURCES
+        src/api_video_webrtc_push.cpp
+    )
+    set(WEBRTC_LIBS webrtc_transport)
+    message(STATUS "Official WebRTC (via ump webrtc_transport): ON")
+else()
+    set(WEBRTC_SOURCES)
+    set(WEBRTC_LIBS)
+    message(STATUS "Official WebRTC (via ump webrtc_transport): OFF")
+endif()
+
 # ============================================================================
 # 源文件列表
 # ============================================================================
@@ -368,6 +384,10 @@ if(ENABLE_LIBPEER)
     list(APPEND VIDEO_SOURCES ${LIBPEER_SOURCES})
 endif()
 
+if(ENABLE_WEBRTC)
+    list(APPEND VIDEO_SOURCES ${WEBRTC_SOURCES})
+endif()
+
 # ============================================================================
 # 链接库列表
 # ============================================================================
@@ -420,9 +440,6 @@ if(USE_RK_PLATFORM)
     if(ENABLE_ISP)
         list(APPEND RK_LIBS librkaiq.so)
     endif()
-elseif(USE_AM311X_PLATFORM)
-    # libvideo_codec.so 动态依赖 libmhal.so → libvpu.so，需直接链接
-    set(AM311X_LIBS libmhal.so libvpu.so)
 endif()
 
 # ROS2 库
@@ -457,10 +474,10 @@ set(ALL_LIBS
     ${BASE_LIBS}
     ${OPTIONAL_LIBS}
     ${RK_LIBS}
-    ${AM311X_LIBS}
     ${ROS2_LIBS_FINAL}
     ${RTSP_BACKEND_LIBS}
     ${LIBPEER_LIBS}
+    ${WEBRTC_LIBS}
 )
 
 # ============================================================================
@@ -475,21 +492,11 @@ endforeach()
 # ============================================================================
 # 安装配置
 # ============================================================================
-# 配置文件：根据平台选择对应的 video.json（安装到 etc/conf/ 下，与 video.sh 读取路径一致）
-if(USE_AM311X_PLATFORM)
-    install(FILES ${CMAKE_SOURCE_DIR}/conf/video_311x.json
-        DESTINATION ${CMAKE_INSTALL_PREFIX}/etc/conf
-        RENAME video.json
-    )
-else()
-    install(FILES ${CMAKE_SOURCE_DIR}/conf/video.json
-        DESTINATION ${CMAKE_INSTALL_PREFIX}/etc/conf
-    )
-endif()
-# 其他配置文件（toml 等）
+# 配置文件
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/conf
     DESTINATION ${CMAKE_INSTALL_PREFIX}/etc
-    FILES_MATCHING
+    FILES_MATCHING 
+    PATTERN "*.json"
     PATTERN "*.toml"
 )
 
@@ -551,6 +558,7 @@ message(STATUS "    ISP:          ${ENABLE_ISP}")
 message(STATUS "    WebSocket:    ${ENABLE_WEBSOCKETS}")
 message(STATUS "    Iceoryx:      ${ENABLE_ICEORYX}")
 message(STATUS "    Libpeer:      ${ENABLE_LIBPEER}")
+message(STATUS "    WebRTC:       ${ENABLE_WEBRTC}")
 message(STATUS "    ROS2:         ${ENABLE_ROS2}")
 message(STATUS "")
 message(STATUS "  Source files:   ${VIDEO_SOURCES}")

@@ -9,17 +9,10 @@ namespace ecovacs
 
     VideoCapture::~VideoCapture() = default;
 
-    std::unique_ptr<VideoCapture> VideoCapture::Create(size_t width, size_t height, size_t target_fps,
-                                                       size_t device_index, int32_t csi_id,
-                                                       const std::string &stream_type,
-                                                       const std::string &image_type)
+    std::unique_ptr<VideoCapture> VideoCapture::Create(size_t width, size_t height, size_t target_fps, size_t device_index)
     {
         auto vcm_capture = std::make_unique<VideoCapture>();
-        vcm_capture->stream_type_ = stream_type;
-        vcm_capture->image_type_ = image_type;
-        ump_info("VideoCapture::Create: %dx%d@%d csi_id=%d stream_type=%s image_type=%s\n",
-                 width, height, target_fps, csi_id, stream_type.c_str(), image_type.c_str());
-        if (!vcm_capture->Init(width, height, target_fps, device_index, csi_id, stream_type, image_type))
+        if (!vcm_capture->Init(width, height, target_fps, device_index))
         {
             ump_error("Failed to create VideoCapture %dx%d@%d", width, height, target_fps);
             return nullptr;
@@ -96,10 +89,9 @@ namespace ecovacs
         vcm_->DeRegisterCaptureDataCallback();
     }
 
-    bool VideoCapture::Init(size_t width, size_t height, size_t target_fps, size_t device_index,
-                            int32_t csi_id, const std::string &stream_type, const std::string &image_type)
+    bool VideoCapture::Init(size_t width, size_t height, size_t target_fps, size_t device_index)
     {
-    #if defined(RK_PLATFORM) || defined(AM311X_PLATFORM)
+    #if defined(RK_PLATFORM)
         auto device_info = std::unique_ptr<VideoCaptureModule::DeviceInfo>(VideoCaptureFactory::CreateDeviceInfo());
 
         uint32_t number = device_info->NumberOfDevices();
@@ -130,15 +122,10 @@ namespace ecovacs
         requestCap.width = static_cast<int32_t>(width);
         requestCap.height = static_cast<int32_t>(height);
         requestCap.maxFPS = static_cast<int32_t>(target_fps);
-#if defined(AM311X_PLATFORM)
-        // AM311x ISP FR 主推 YUYV，NV12 的 UV 平面输出不正确（绿屏）
-        requestCap.videoType = video_common::VideoType::kYUY2;
-#else
         requestCap.videoType = video_common::VideoType::kNV12;
-#endif
 
         VideoCaptureCapability bestCap = requestCap;
-#if defined(RK_PLATFORM) || defined(AM311X_PLATFORM)
+#if defined(RK_PLATFORM)
         int32_t num = device_info->GetBestMatchedCapability(unique_name, requestCap, bestCap);
         if (0 == num)
         {
@@ -150,14 +137,7 @@ namespace ecovacs
         capability_ = bestCap;
         capability_.maxFPS = static_cast<int32_t>(target_fps);
 
-#if defined(AM311X_PLATFORM)
-        vcm_ = std::unique_ptr<VideoCaptureModule>(VideoCaptureFactory::Create(device_index, csi_id, stream_type.c_str(), image_type.c_str()));
-#else
-        (void)csi_id;
-        (void)stream_type;
-        (void)image_type;
         vcm_ = std::unique_ptr<VideoCaptureModule>(VideoCaptureFactory::Create(device_index));
-#endif
         if (!vcm_)
         {
             ump_error("VideoCaptureFactory::Create failed");

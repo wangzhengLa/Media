@@ -19,6 +19,9 @@
 #if defined(ENABLE_LIBPEER)
 #include "api_video_libpeer_push.h"
 #endif
+#if defined(ENABLE_WEBRTC)
+#include "api_video_webrtc_push.h"
+#endif
 #include "api_jpeg_upload.h"
 #include "api_video_ai_process.h"
 #include "api_raw_video_save.h"
@@ -161,6 +164,23 @@ namespace ecovacs
     };
 #endif
 
+#if defined(ENABLE_WEBRTC)
+    // 视频推流官方裁剪栈 webrtc 元件
+    class VideoWebrtcPushElement
+    {
+    public:
+        VideoWebrtcPushElement() = default;
+        static std::unique_ptr<VideoWebrtcPushElement> Create();
+        ~VideoWebrtcPushElement() = default;
+
+        VideoWebrtcPushElement(const VideoWebrtcPushElement &) = delete;
+        VideoWebrtcPushElement &operator=(const VideoWebrtcPushElement &) = delete;
+
+    public:
+        std::shared_ptr<VideoWebrtcPush> video_push_;
+    };
+#endif
+
     // 视频AI处理元件
     class VideoAiProcessElement
     {
@@ -220,6 +240,10 @@ namespace ecovacs
         int32_t StartLibpeerPush();
         int32_t StopLibpeerPush();
 #endif
+#if defined(ENABLE_WEBRTC)
+        int32_t StartWebrtcPush();
+        int32_t StopWebrtcPush();
+#endif
         int32_t StartAI();
         int32_t StopAI();
         int32_t StartRecord();
@@ -266,7 +290,10 @@ namespace ecovacs
         std::unique_ptr<VideoPushElement> video_push_element_;
         std::unique_ptr<VideoRtspPushElement> video_rtsp_push_element_;
 #if defined(ENABLE_LIBPEER)
-        std::unique_ptr<VideoLibpeerPushElement> video_libpeer_push_element_;
+    std::unique_ptr<VideoLibpeerPushElement> video_libpeer_push_element_;
+#endif
+#if defined(ENABLE_WEBRTC)
+    std::unique_ptr<VideoWebrtcPushElement> video_webrtc_push_element_;
 #endif
 
         // AI 相关

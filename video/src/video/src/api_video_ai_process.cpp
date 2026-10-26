@@ -80,13 +80,13 @@ namespace ecovacs
     {
         uint32_t width = frame->width();
         uint32_t height = frame->height();
-        bool is_rgb = (frame->type() == video_common::FrameType::kRGB24);
+        uint32_t y_size = width * height;
+        uint32_t uv_size = y_size / 2;
 
         static int frame_counter = 0;
         if (++frame_counter % 100 == 0)
         {
-            ump_info("[VideoAI] Pub %s #%d: %dx%d", is_rgb ? "RGB24" : "NV12",
-                     frame_counter, width, height);
+            ump_info("[VideoAI] Pub NV12 #%d: %dx%d", frame_counter, width, height);
         }
 
         NV12FrameMessage msg;
@@ -94,58 +94,32 @@ namespace ecovacs
         msg.height = height;
         msg.stride_y = frame->StrideY();
         msg.stride_uv = frame->StrideUV();
-        msg.format = is_rgb ? 1 : 0;
         msg.timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
                             std::chrono::system_clock::now().time_since_epoch())
                             .count();
+        msg.data.resize(y_size + uv_size);
 
-        if (is_rgb)
+        uint8_t *y_dst = msg.data.data();
+        uint8_t *uv_dst = y_dst + y_size;
+
+        if (frame->StrideY() != static_cast<int>(width))
         {
-            // RGB24: 单平面，stride = width * 3
-            uint32_t rgb_size = width * height * 3;
-            msg.data.resize(rgb_size);
-            int src_stride = frame->StrideY();
-            int dst_stride = width * 3;
-            if (src_stride == dst_stride)
-            {
-                AIMemcpy(msg.data.data(), frame->DataY(), rgb_size);
-            }
-            else
-            {
-                for (uint32_t row = 0; row < height; row++)
-                    AIMemcpy(msg.data.data() + row * dst_stride,
-                             frame->DataY() + row * src_stride,
-                             dst_stride);
-            }
+            for (uint32_t row = 0; row < height; row++)
+                AIMemcpy(y_dst + row * width, frame->DataY() + row * frame->StrideY(), width);
         }
         else
         {
-            uint32_t y_size = width * height;
-            uint32_t uv_size = y_size / 2;
-            msg.data.resize(y_size + uv_size);
+            AIMemcpy(y_dst, frame->DataY(), y_size);
+        }
 
-            uint8_t *y_dst = msg.data.data();
-            uint8_t *uv_dst = y_dst + y_size;
-
-            if (frame->StrideY() != static_cast<int>(width))
-            {
-                for (uint32_t row = 0; row < height; row++)
-                    AIMemcpy(y_dst + row * width, frame->DataY() + row * frame->StrideY(), width);
-            }
-            else
-            {
-                AIMemcpy(y_dst, frame->DataY(), y_size);
-            }
-
-            if (frame->StrideUV() != static_cast<int>(width))
-            {
-                for (uint32_t row = 0; row < height / 2; row++)
-                    AIMemcpy(uv_dst + row * width, frame->DataUV() + row * frame->StrideUV(), width);
-            }
-            else
-            {
-                AIMemcpy(uv_dst, frame->DataUV(), uv_size);
-            }
+        if (frame->StrideUV() != static_cast<int>(width))
+        {
+            for (uint32_t row = 0; row < height / 2; row++)
+                AIMemcpy(uv_dst + row * width, frame->DataUV() + row * frame->StrideUV(), width);
+        }
+        else
+        {
+            AIMemcpy(uv_dst, frame->DataUV(), uv_size);
         }
 
         MessageBus::instance().publish("video/nv12_frame", msg);
@@ -156,67 +130,42 @@ namespace ecovacs
     {
         uint32_t width = frame->width();
         uint32_t height = frame->height();
-        bool is_rgb = (frame->type() == video_common::FrameType::kRGB24);
+        uint32_t y_size = width * height;
+        uint32_t uv_size = (width * height) / 2;
 
         auto msg = std::make_unique<sensor_msgs::msg::Image>();
-        msg->header.frame_id = is_rgb ? "camera_frame_rgb" : "camera_frame_nv12";
+        msg->header.frame_id = "camera_frame_nv12";
         msg->header.stamp = rclcpp::Time(frame->timestamp() * 1000000ULL);
+        msg->encoding = "nv12";
         msg->width = width;
         msg->height = height;
+        msg->step = width;
         msg->is_bigendian = false;
+        msg->data.resize(y_size + uv_size);
 
-        if (is_rgb)
+        uint8_t *ros2_buf_y = &msg->data[0];
+        uint8_t *ros2_buf_uv = &msg->data[y_size];
+
+        if (frame->StrideY() != static_cast<int>(width))
         {
-            msg->encoding = "rgb8";
-            msg->step = width * 3;
-            uint32_t rgb_size = width * height * 3;
-            msg->data.resize(rgb_size);
-            int src_stride = frame->StrideY();
-            int dst_stride = width * 3;
-            if (src_stride == dst_stride)
-            {
-                AIMemcpy(msg->data.data(), frame->DataY(), rgb_size);
-            }
-            else
-            {
-                for (uint32_t row = 0; row < height; row++)
-                    AIMemcpy(msg->data.data() + row * dst_stride,
-                             frame->DataY() + row * src_stride,
-                             dst_stride);
-            }
+            for (uint32_t row = 0; row < height; row++)
+                AIMemcpy(ros2_buf_y + row * width,
+                         frame->DataY() + row * frame->StrideY(), width);
         }
         else
         {
-            uint32_t y_size = width * height;
-            uint32_t uv_size = (width * height) / 2;
-            msg->encoding = "nv12";
-            msg->step = width;
-            msg->data.resize(y_size + uv_size);
+            AIMemcpy(ros2_buf_y, frame->DataY(), y_size);
+        }
 
-            uint8_t *ros2_buf_y = &msg->data[0];
-            uint8_t *ros2_buf_uv = &msg->data[y_size];
-
-            if (frame->StrideY() != static_cast<int>(width))
-            {
-                for (uint32_t row = 0; row < height; row++)
-                    AIMemcpy(ros2_buf_y + row * width,
-                             frame->DataY() + row * frame->StrideY(), width);
-            }
-            else
-            {
-                AIMemcpy(ros2_buf_y, frame->DataY(), y_size);
-            }
-
-            if (frame->StrideUV() != static_cast<int>(width))
-            {
-                for (uint32_t row = 0; row < height / 2; row++)
-                    AIMemcpy(ros2_buf_uv + row * width,
-                             frame->DataUV() + row * frame->StrideUV(), width);
-            }
-            else
-            {
-                AIMemcpy(ros2_buf_uv, frame->DataUV(), uv_size);
-            }
+        if (frame->StrideUV() != static_cast<int>(width))
+        {
+            for (uint32_t row = 0; row < height / 2; row++)
+                AIMemcpy(ros2_buf_uv + row * width,
+                         frame->DataUV() + row * frame->StrideUV(), width);
+        }
+        else
+        {
+            AIMemcpy(ros2_buf_uv, frame->DataUV(), uv_size);
         }
 
         frame_pub_node_->publish_image(topics::CAMERA_IMAGE_NV12, std::move(msg));
@@ -231,14 +180,13 @@ namespace ecovacs
 
         uint32_t width = frame->width();
         uint32_t height = frame->height();
-        bool is_rgb = (frame->type() == video_common::FrameType::kRGB24);
         int stride_y = frame->StrideY();
+        int stride_uv = frame->StrideUV();
 
         if (!jpeg_inited_ ||
             jpeg_encoder_->GetWidth() != static_cast<int>(width) ||
             jpeg_encoder_->GetHeight() != static_cast<int>(height))
         {
-            int stride_uv = is_rgb ? 0 : frame->StrideUV();
             jpeg_inited_ = jpeg_encoder_->Init(width, height, stride_y, stride_uv);
             if (!jpeg_inited_)
             {
@@ -246,20 +194,10 @@ namespace ecovacs
                 enable_jpeg_ = false;
                 return;
             }
-            ump_info("[VideoAI] JPEG encoder reinitialized: %dx%d (%s)",
-                     width, height, is_rgb ? "RGB" : "NV12");
+            ump_info("[VideoAI] JPEG encoder reinitialized: %dx%d", width, height);
         }
 
-        std::vector<uint8_t> jpeg_data;
-        if (is_rgb)
-        {
-            jpeg_data = jpeg_encoder_->EncodeRGB(frame->DataY(), stride_y, jpeg_quality_);
-        }
-        else
-        {
-            jpeg_data = jpeg_encoder_->EncodeNV12(frame->DataY(), frame->DataUV(), jpeg_quality_);
-        }
-
+        auto jpeg_data = jpeg_encoder_->EncodeNV12(frame->DataY(), frame->DataUV(), jpeg_quality_);
         if (!jpeg_data.empty())
         {
             ws_server_->QueueFrame(jpeg_data);
@@ -281,7 +219,8 @@ namespace ecovacs
 
         uint32_t width = frame->width();
         uint32_t height = frame->height();
-        bool is_rgb = (frame->type() == video_common::FrameType::kRGB24);
+        uint32_t y_size = width * height;
+        uint32_t uv_size = y_size / 2;
 
         auto sample = iceoryx_publisher_->loan();
         if (sample.has_error())
@@ -290,55 +229,29 @@ namespace ecovacs
         auto &iox_frame = *sample.value();
         iox_frame.width = width;
         iox_frame.height = height;
-        iox_frame.format = is_rgb ? 1 : 0;
+        iox_frame.stride = width;
 
-        if (is_rgb)
+        if (frame->StrideY() != static_cast<int>(width))
         {
-            // RGB24: 单平面
-            iox_frame.stride = width * 3;
-            uint32_t rgb_size = width * height * 3;
-            int src_stride = frame->StrideY();
-            int dst_stride = width * 3;
-            if (src_stride == dst_stride)
-            {
-                AIMemcpy(iox_frame.data, frame->DataY(), rgb_size);
-            }
-            else
-            {
-                for (uint32_t row = 0; row < height; ++row)
-                    AIMemcpy(iox_frame.data + row * dst_stride,
-                             frame->DataY() + row * src_stride,
-                             dst_stride);
-            }
+            for (uint32_t row = 0; row < height; ++row)
+                AIMemcpy(iox_frame.data + row * width,
+                         frame->DataY() + row * frame->StrideY(), width);
         }
         else
         {
-            iox_frame.stride = width;
-            uint32_t y_size = width * height;
-            uint32_t uv_size = y_size / 2;
+            AIMemcpy(iox_frame.data, frame->DataY(), y_size);
+        }
 
-            if (frame->StrideY() != static_cast<int>(width))
-            {
-                for (uint32_t row = 0; row < height; ++row)
-                    AIMemcpy(iox_frame.data + row * width,
-                             frame->DataY() + row * frame->StrideY(), width);
-            }
-            else
-            {
-                AIMemcpy(iox_frame.data, frame->DataY(), y_size);
-            }
-
-            uint8_t *uv_dst = iox_frame.data + y_size;
-            if (frame->StrideUV() != static_cast<int>(width))
-            {
-                for (uint32_t row = 0; row < height / 2; ++row)
-                    AIMemcpy(uv_dst + row * width,
-                             frame->DataUV() + row * frame->StrideUV(), width);
-            }
-            else
-            {
-                AIMemcpy(uv_dst, frame->DataUV(), uv_size);
-            }
+        uint8_t *uv_dst = iox_frame.data + y_size;
+        if (frame->StrideUV() != static_cast<int>(width))
+        {
+            for (uint32_t row = 0; row < height / 2; ++row)
+                AIMemcpy(uv_dst + row * width,
+                         frame->DataUV() + row * frame->StrideUV(), width);
+        }
+        else
+        {
+            AIMemcpy(uv_dst, frame->DataUV(), uv_size);
         }
 
         sample.value().publish();

@@ -32,11 +32,6 @@ namespace ecovacs
 
             static VideoCaptureModule *Create(int32_t deviceIndex);
 
-#ifdef AM311X_PLATFORM
-            static VideoCaptureModule *Create(int32_t deviceIndex, int32_t csi_id,
-                                              const char *stream_type, const char *image_type);
-#endif
-
             static DeviceInfo *CreateDeviceInfo();
 
             // Helpers for converting between (integral) degrees and

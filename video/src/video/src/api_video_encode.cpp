@@ -62,6 +62,10 @@ namespace ecovacs
             return -1;
         }
 
+        frame_rate_ctl_.Reset();
+        frame_rate_ctl_.SetMaxFramerate(codec_settings->maxFramerate);
+        ump_info("[VideoEncode] framerate limit set to %.1f fps\n", codec_settings->maxFramerate);
+
         cfg_ = *codec_settings;
         return 0;
     }
@@ -260,15 +264,6 @@ namespace ecovacs
         ptFrame = (FrameBuffer *)IntelliGetBuffer(&frame_buf_hndl_, IPC_INTELLI_FULL_BUFFER_FLAG, IPC_INTELLI_TIMEOUT_NONE);
         if (ptFrame)
         {
-            // ====== 跳过 ISP 预热帧（抓拍场景） ======
-            if (skip_frames_.load(std::memory_order_acquire) > 0)
-            {
-                skip_frames_.fetch_sub(1, std::memory_order_acq_rel);
-                ptFrame->frame->RelRef();
-                IntelliPutBuffer(&frame_buf_hndl_, ptFrame, IPC_INTELLI_EMPTY_BUFFER_FLAG);
-                return true;
-            }
-
             // ====== 编码性能统计（每秒打印一次） ======
             static int64_t s_last_log_us = 0;
             static uint32_t s_frame_count = 0;
@@ -320,6 +315,9 @@ namespace ecovacs
         {
             return;
         }
+
+        if (frame_rate_ctl_.ShouldDropFrame(IntelliUtilTimeNanos()))
+            return;
 
         FrameBuffer *ptFrame = (FrameBuffer *)IntelliGetBuffer(&frame_buf_hndl_, IPC_INTELLI_EMPTY_BUFFER_FLAG, IPC_INTELLI_TIMEOUT_NONE);
         if (ptFrame)

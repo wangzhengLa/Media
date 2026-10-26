@@ -8,15 +8,12 @@
 #include <signal.h>
 #include <atomic>
 #include <cstdio>
-#include <cmath>
-#include <mutex>
 #include <vector>
 #include <alsa/asoundlib.h>   // ALSA 头文件
 
 static std::ofstream outfile_raw;
 static std::ofstream outfile_processed;
 static std::ofstream outfile_8k;
-static std::ofstream outfile_ref;
 static AlsaRecorder* g_recorder = nullptr;
 static std::atomic<bool> g_should_exit{false};
 static AudioResampler g_resampler;
@@ -24,66 +21,81 @@ static AudioProcessor* g_processor = nullptr;
 
 // 帧缓存
 static std::vector<int16_t> g_frame_buffer;
-static size_t g_frame_size = 0;  // 每声道每帧样本数（10ms）
+static size_t g_frame_size = 0;
+static std::vector<int16_t> g_zero_render;
 
-// 声道选择（0-indexed）：第1声道作麦克风原声
-static const int kMicChannel = 0;
-// 参考声道（0-indexed），可由 argv[5] 指定（默认第6路 index=5），用于扫描哪一路才是真正参考
-static int g_ref_channel = 5;
+// 播放设备句柄（用于查询延迟）
+static snd_pcm_t* g_playback_handle = nullptr;
+static int g_playback_sample_rate = 0;
+
+// ---------- 延迟获取函数 ----------
+static int get_capture_delay_ms(snd_pcm_t* handle, int sample_rate) {
+    if (!handle) return -1;
+    snd_pcm_sframes_t delay_frames;
+    int err = snd_pcm_delay(handle, &delay_frames);
+    if (err < 0 || delay_frames < 0) return -1;
+    return (int)((double)delay_frames * 1000.0 / sample_rate);
+}
+
+static int get_playback_delay_ms(snd_pcm_t* handle, int sample_rate) {
+    if (!handle) return -1;
+    snd_pcm_sframes_t delay_frames;
+    int err = snd_pcm_delay(handle, &delay_frames);
+    if (err < 0 || delay_frames < 0) return -1;
+    return (int)((double)delay_frames * 1000.0 / sample_rate);
+}
+
+static int get_total_delay_ms() {
+    if (!g_recorder) return -1;
+    // 采集延迟（假设 AlsaRecorder 已提供 GetCaptureDelayMs()）
+    int cap_delay = g_recorder->GetCaptureDelayMs();
+    int play_delay = get_playback_delay_ms(g_playback_handle, g_playback_sample_rate);
+    const int FIXED_OFFSET_MS = 20; // 根据实际硬件调整
+    if (cap_delay >= 0 && play_delay >= 0) {
+        return cap_delay + play_delay + FIXED_OFFSET_MS;
+    } else if (cap_delay >= 0) {
+        return cap_delay + FIXED_OFFSET_MS;
+    } else if (play_delay >= 0) {
+        return play_delay + FIXED_OFFSET_MS;
+    }
+    return -1; // 无法获取
+}
 
 // ---------- 音频回调 ----------
 void OnAudioData(const int16_t* data, size_t bytes, int sample_rate, int channels) {
-    // 需要至少 g_ref_channel+1 个声道（第1声道 mic，指定声道 ref）
-    if (channels <= g_ref_channel) {
-        std::cerr << "Error: need at least " << (g_ref_channel + 1)
-                  << " channels, got " << channels << std::endl;
+    if (channels != 1) {
+        std::cerr << "Warning: multi-channel data, only first channel used." << std::endl;
         return;
     }
 
     size_t total_samples = bytes / sizeof(int16_t);
     if (g_frame_size == 0) {
-        g_frame_size = sample_rate / 100;  // 每声道每帧样本数（10ms）
+        g_frame_size = sample_rate / 100;
+        g_zero_render.assign(g_frame_size, 0);
     }
 
-    // 交错数据直接入缓冲
     g_frame_buffer.insert(g_frame_buffer.end(), data, data + total_samples);
 
-    // 一帧的交错样本数 = 每声道帧长 × 声道数
-    size_t frame_interleaved = (size_t)g_frame_size * channels;
+    while (g_frame_buffer.size() >= g_frame_size) {
+        std::vector<int16_t> rec_frame(g_frame_buffer.begin(), g_frame_buffer.begin() + g_frame_size);
+        g_frame_buffer.erase(g_frame_buffer.begin(), g_frame_buffer.begin() + g_frame_size);
 
-    while (g_frame_buffer.size() >= frame_interleaved) {
-        // 取出一帧交错数据
-        std::vector<int16_t> frame(g_frame_buffer.begin(),
-                                    g_frame_buffer.begin() + frame_interleaved);
-        g_frame_buffer.erase(g_frame_buffer.begin(),
-                              g_frame_buffer.begin() + frame_interleaved);
-
-        // 拆分声道：抽取第1声道(mic)和第6声道(ref)
-        std::vector<int16_t> rec_frame(g_frame_size);
-        std::vector<int16_t> ref_frame(g_frame_size);
-        for (size_t i = 0; i < g_frame_size; i++) {
-            rec_frame[i] = frame[i * channels + kMicChannel];
-            ref_frame[i] = frame[i * channels + g_ref_channel];
-        }
-
-        // 保存原始麦克风数据 (record1.pcm)
+        // 保存原始数据 (record1.pcm)
         if (outfile_raw.is_open()) {
             outfile_raw.write(reinterpret_cast<const char*>(rec_frame.data()),
                               rec_frame.size() * sizeof(int16_t));
         }
-        // 保存回采参考信号 (record_ref.pcm)，用于验证第6声道是否为干净的播放参考
-        if (outfile_ref.is_open()) {
-            outfile_ref.write(reinterpret_cast<const char*>(ref_frame.data()),
-                              ref_frame.size() * sizeof(int16_t));
-        }
 
-        // 处理音频（降噪/AEC），使用第6声道回采作为参考信号；延时由 AEC3 内部自动估算
+        // 处理音频（降噪/AEC）
         std::vector<int16_t> processed(g_frame_size);
         if (g_processor) {
+            int delay_ms = get_total_delay_ms();
+            if (delay_ms < 0) delay_ms = 0; // 无效时使用0
             int ret = audio_processor_process(g_processor,
                                               rec_frame.data(),
-                                              ref_frame.data(),
-                                              processed.data());
+                                              g_zero_render.data(),
+                                              processed.data(),
+                                              delay_ms);
             if (ret != 0) {
                 std::cerr << "Audio processing error: " << ret << ", using original." << std::endl;
                 processed = rec_frame;
@@ -129,12 +141,10 @@ int main(int argc, char* argv[]) {
 
     const char* device  = (argc > 1) ? argv[1] : "default";
     int sample_rate     = (argc > 2) ? std::stoi(argv[2]) : 16000;
-    int channels        = (argc > 3) ? std::stoi(argv[3]) : 6;
-    int noise_level     = (argc > 4) ? std::stoi(argv[4]) : 2;
-    if (argc > 5) g_ref_channel = std::stoi(argv[5]);
+    int channels        = (argc > 3) ? std::stoi(argv[3]) : 1;
 
     // 创建音频处理器
-    g_processor = audio_processor_create(sample_rate, noise_level);
+    g_processor = audio_processor_create(sample_rate, 1);
     if (!g_processor) {
         std::cerr << "Warning: Failed to create audio processor; continuing without processing." << std::endl;
     }
@@ -146,18 +156,42 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
+    // ---- 打开播放设备（仅用于延迟查询） ----
+    int err = snd_pcm_open(&g_playback_handle, device, SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK);
+    if (err < 0) {
+        std::cerr << "Warning: Cannot open playback device for delay query: " << snd_strerror(err) << std::endl;
+        g_playback_handle = nullptr;
+    } else {
+        // 设置参数（与录音一致）
+        snd_pcm_hw_params_t* params;
+        snd_pcm_hw_params_alloca(&params);
+        snd_pcm_hw_params_any(g_playback_handle, params);
+        snd_pcm_hw_params_set_access(g_playback_handle, params, SND_PCM_ACCESS_RW_INTERLEAVED);
+        snd_pcm_hw_params_set_format(g_playback_handle, params, SND_PCM_FORMAT_S16_LE);
+        snd_pcm_hw_params_set_channels(g_playback_handle, params, channels);
+        unsigned int rate = sample_rate;
+        snd_pcm_hw_params_set_rate_near(g_playback_handle, params, &rate, nullptr);
+        err = snd_pcm_hw_params(g_playback_handle, params);
+        if (err < 0) {
+            std::cerr << "Warning: Failed to set playback parameters for delay query: " << snd_strerror(err) << std::endl;
+            snd_pcm_close(g_playback_handle);
+            g_playback_handle = nullptr;
+        } else {
+            g_playback_sample_rate = rate;
+        }
+    }
+
     // 打开输出文件
     const char* path_raw      = "/oem/record1.pcm";
     const char* path_processed = "/oem/record2.pcm";
     const char* path_8k       = "/oem/record3.pcm";
-    const char* path_ref      = "/oem/record_ref.pcm";
     outfile_raw.open(path_raw, std::ios::binary);
     outfile_processed.open(path_processed, std::ios::binary);
     outfile_8k.open(path_8k, std::ios::binary);
-    outfile_ref.open(path_ref, std::ios::binary);
     if (!outfile_raw.is_open() || !outfile_processed.is_open() || !outfile_8k.is_open()) {
         std::cerr << "Failed to open output files." << std::endl;
         if (g_processor) audio_processor_destroy(g_processor);
+        if (g_playback_handle) snd_pcm_close(g_playback_handle);
         return -1;
     }
 
@@ -167,25 +201,17 @@ int main(int argc, char* argv[]) {
         outfile_raw.close();
         outfile_processed.close();
         outfile_8k.close();
-        outfile_ref.close();
         if (g_processor) audio_processor_destroy(g_processor);
+        if (g_playback_handle) snd_pcm_close(g_playback_handle);
         return -1;
     }
 
-    std::cout << "Recording (" << channels << "ch, " << sample_rate
-              << "Hz) with ";
-    if (noise_level <= 0)
-        std::cout << "PURE AEC (AGC/NS off)";
-    else
-        std::cout << "NS(level=" << noise_level << ") + AEC";
-    std::cout << " (ch1=mic, ch" << (g_ref_channel + 1) << "=loopback ref)" << std::endl;
+    std::cout << "Recording (mono, " << sample_rate << "Hz) with NS + AEC (zero reference)..." << std::endl;
     std::cout << "Saving original data to " << path_raw << std::endl;
     std::cout << "Saving processed (original rate) to " << path_processed << std::endl;
     std::cout << "Saving resampled (8kHz) to " << path_8k << std::endl;
-    std::cout << "Saving echo reference to " << path_ref << std::endl;
     std::cout << "Press Ctrl+C to stop." << std::endl;
 
-    // 等待录音结束（轮询错误/按 Ctrl+C 退出），不做运行时统计打印
     while (recorder.IsRecording() && !g_should_exit) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         if (recorder.GetState() == RecorderState::Error) {
@@ -198,11 +224,14 @@ int main(int argc, char* argv[]) {
     outfile_raw.close();
     outfile_processed.close();
     outfile_8k.close();
-    outfile_ref.close();
 
     if (g_processor) {
         audio_processor_destroy(g_processor);
         g_processor = nullptr;
+    }
+    if (g_playback_handle) {
+        snd_pcm_close(g_playback_handle);
+        g_playback_handle = nullptr;
     }
 
     std::cout << "===== Recording Statistics =====" << std::endl;

@@ -665,15 +665,16 @@ namespace ecovacs
         std::vector<int16_t> denoised(pcm_in.size());
         if (audio_processor_) {
             const int proc_frame = AUDIO_INPUT_RATE / 100;  // 160 samples @ 16kHz
-            // 延时由 AEC3 内部自动估算；参考传空 = AEC 无回声（透传降噪）
             audio_processor_process(audio_processor_,
                                     pcm_in.data(),
                                     nullptr,
-                                    denoised.data());
+                                    denoised.data(),
+                                    0);
             audio_processor_process(audio_processor_,
                                     pcm_in.data() + proc_frame,
                                     nullptr,
-                                    denoised.data() + proc_frame);
+                                    denoised.data() + proc_frame,
+                                    0);
         } else {
             denoised = pcm_in;
         }

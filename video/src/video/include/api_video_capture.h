@@ -3,7 +3,6 @@
 
 #include <memory>
 #include <mutex>
-#include <string>
 #include "video_common_defines.h"
 #include "video_capture.h"
 
@@ -15,10 +14,7 @@ namespace ecovacs
         VideoCapture();  // 构造函数改为 public
         ~VideoCapture();
 
-        static std::unique_ptr<VideoCapture> Create(size_t width, size_t height, size_t target_fps,
-                                                    size_t capture_device_index, int32_t csi_id = -1,
-                                                    const std::string &stream_type = "fr",
-                                                    const std::string &image_type = "YUYV");
+        static std::unique_ptr<VideoCapture> Create(size_t width, size_t height, size_t target_fps, size_t capture_device_index);
 
         int32_t StartCapture();
         int32_t StopCapture();
@@ -29,14 +25,10 @@ namespace ecovacs
         void Destroy();
 
     private:
-        bool Init(size_t width, size_t height, size_t target_fps, size_t capture_device_index,
-                  int32_t csi_id = -1, const std::string &stream_type = "fr",
-                  const std::string &image_type = "YUYV");
+        bool Init(size_t width, size_t height, size_t target_fps, size_t capture_device_index);
 
         std::unique_ptr<VideoCaptureModule> vcm_;
         VideoCaptureCapability capability_;
-        std::string stream_type_;
-        std::string image_type_;
         mutable std::mutex mutex_;
     };
 

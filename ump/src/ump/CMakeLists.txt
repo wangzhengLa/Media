@@ -1,4 +1,3 @@
-
 cmake_minimum_required(VERSION 3.0.2)
 project(ump)
 
@@ -49,15 +48,13 @@ endif()
 
 option(USE_AW_PLATFORM "use aw platform flag" OFF)
 option(USE_RK_PLATFORM "use rk platform flag" OFF)
-option(USE_AM311X_PLATFORM "use am311x platform flag" OFF)
 option(BUILD_TUTORIALS "Build tutorial examples" ON)
+option(ENABLE_WEBRTC_TRANSPORT "enable webrtc transport module" OFF)
 
 if(USE_RK_PLATFORM)
     add_definitions(-DRK_PLATFORM)
 elseif(USE_AW_PLATFORM)
     add_definitions(-DAW_PLATFORM)
-elseif(USE_AM311X_PLATFORM)
-    add_definitions(-DAM311X_PLATFORM)
 endif()
 
 # ============================================================================
@@ -65,6 +62,17 @@ endif()
 # ============================================================================
 
 set(THIRD_PARTY_BASE ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
+
+# WebRTC transport (official trimmed libwebrtc stack) — must be after THIRD_PARTY_BASE.
+# NOTE: include path is applied target-privately below; do NOT use a global
+# include_directories() here, otherwise the full WebRTC headers (which require
+# C++20 and pollute the `rtc`/`webrtc` namespaces) leak into other targets
+# such as audio_processor that rely on the separate webrtc-audio-processing
+# headers and are compiled with C++17.
+if(ENABLE_WEBRTC_TRANSPORT)
+    set(WEBRTC_INSTALL ${THIRD_PARTY_BASE}/webrtc/install/root/usr)
+    file(GLOB WEBRTC_RLIBS ${WEBRTC_INSTALL}/lib/webrtc_rlib/*.rlib)
+endif()
 
 # 通用第三方库
 set(COMMON_THIRD_PARTY
@@ -85,6 +93,9 @@ foreach(lib ${COMMON_THIRD_PARTY})
         link_directories(${lib_dir})
     endif()
 endforeach()
+
+# Boost 特殊处理
+include_directories(${THIRD_PARTY_BASE}/boost/src/boost-1.80.0)
 
 # ====== ALSA 库路径 ======
 set(ALSA_ROOT ${THIRD_PARTY_BASE}/alsa-lib/install/root/usr)
@@ -137,6 +148,7 @@ set(PROJECT_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/include/audio_coding
     ${CMAKE_CURRENT_SOURCE_DIR}/include/audio_resample
     ${CMAKE_CURRENT_SOURCE_DIR}/include/audio_processor
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/webrtc_transport
 )
 
 foreach(dir ${PROJECT_INCLUDE_DIRS})
@@ -163,13 +175,6 @@ elseif(USE_AW_PLATFORM)
     include_directories(${THIRD_PARTY_BASE}/libcedarc/install/root/usr/include/vencoder-base)
     
     link_directories(${THIRD_PARTY_BASE}/libcedarc/install/root/usr/lib)
-elseif(USE_AM311X_PLATFORM)
-    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include/video_capture/am311x_v4l2)
-    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include/video_coding/am311x_codec_impl)
-    # MHAL（Amicro 硬件抽象层）+ VPU（Hantro H264/JPEG 硬编，mhal 二级依赖）
-    include_directories(${THIRD_PARTY_BASE}/mhal/install/root/usr/include/mhal)
-    link_directories(${THIRD_PARTY_BASE}/mhal/install/root/usr/lib)
-    link_directories(${THIRD_PARTY_BASE}/vpulib/install/root/usr/lib)
 endif()
 
 # ============================================================================
@@ -235,6 +240,38 @@ if(EXISTS ${WEBRTC_LIB})
 else()
     target_link_libraries(audio_processor webrtc-audio-processing-2)
 endif()
+
+# ===== WebRTC Transport（官方裁剪栈）=====
+if(ENABLE_WEBRTC_TRANSPORT)
+    add_library(webrtc_transport SHARED
+        src/webrtc_transport/video.cpp
+        src/webrtc_transport/audio.cpp
+        src/webrtc_transport/peerconnection.cpp
+        src/webrtc_transport/ws_signaling_client.cpp
+    )
+    target_include_directories(webrtc_transport PRIVATE
+        ${WEBRTC_INSTALL}/include/webrtc
+    )
+    target_compile_definitions(webrtc_transport PRIVATE ENABLE_WEBRTC_TRANSPORT)
+    set_source_files_properties(
+        src/webrtc_transport/video.cpp
+        src/webrtc_transport/audio.cpp
+        src/webrtc_transport/peerconnection.cpp
+        PROPERTIES COMPILE_FLAGS "-std=c++20 -fno-rtti -DNDEBUG -Wno-changes-meaning -Wno-deprecated-declarations -DWEBRTC_POSIX"
+    )
+    target_link_libraries(webrtc_transport
+        log osp video_common
+        -Wl,--start-group
+        ${WEBRTC_INSTALL}/lib/libwebrtc.a
+        ${WEBRTC_RLIBS}
+        -lpthread -ldl -lm
+        -Wl,--end-group
+        -Wl,--gc-sections
+    )
+    message(STATUS "WebRTC Transport (trimmed, static): ON")
+else()
+    message(STATUS "WebRTC Transport (trimmed, static): OFF")
+endif()
 # ============================================================================
 # 平台特定库
 # ============================================================================
@@ -248,7 +285,7 @@ if(USE_RK_PLATFORM)
         src/video_capture/rk_linux_v4l2/device_info_v4l2.cpp
         src/video_capture/rk_linux_v4l2/device_info_linux.cpp
         src/video_capture/video_capture_factory.cpp)
-    target_link_libraries(video_capture bus osp log video_common libyuv.so zlog turbojpeg)
+    target_link_libraries(video_capture bus osp log video_common libyuv.so zlog)
     add_dependencies(video_capture bus osp log video_common)
 
     add_library(video_codec SHARED 
@@ -267,7 +304,7 @@ elseif(USE_AW_PLATFORM)
         src/video_capture/rk_linux_v4l2/device_info_v4l2.cpp
         src/video_capture/rk_linux_v4l2/device_info_linux.cpp
         src/video_capture/video_capture_factory.cpp)
-    target_link_libraries(video_capture bus osp log video_common libyuv.so zlog turbojpeg)
+    target_link_libraries(video_capture bus osp log video_common libyuv.so zlog)
     add_dependencies(video_capture bus osp log video_common)
 
     add_library(video_codec SHARED 
@@ -275,27 +312,7 @@ elseif(USE_AW_PLATFORM)
         src/video_coding/allwinner_codec_impl/allwinner_encoder_handle.cpp
         src/video_coding/video_encoder_factory.cpp
         src/video_coding/video_encoder_impl.cpp)
-    target_link_libraries(video_codec osp log zlog libMemAdapter.so libvencoder.so VE cdc_base venc_codec venc_base turbojpeg)
-    add_dependencies(video_codec log osp)
-elseif(USE_AM311X_PLATFORM)
-    # ========== AM311x 采集（Media Controller + V4L2 + DMA-BUF） ==========
-    add_library(video_capture SHARED 
-        src/video_capture/device_info_impl.cpp
-        src/video_capture/video_capture_impl.cpp
-        src/video_capture/am311x_v4l2/video_capture_am311x.cpp
-        src/video_capture/am311x_v4l2/video_capture_linux.cpp
-        src/video_capture/am311x_v4l2/device_info_am311x.cpp
-        src/video_capture/am311x_v4l2/device_info_linux.cpp
-        src/video_capture/video_capture_factory.cpp)
-    target_link_libraries(video_capture bus osp log video_common libyuv.so zlog turbojpeg)
-    add_dependencies(video_capture bus osp log video_common)
-
-    # ========== AM311x 编码（直接调 MHAL libmhal.so，流程移植自 camera_v2_venc.c） ==========
-    add_library(video_codec SHARED 
-        src/video_coding/am311x_codec_impl/am311x_encoder_impl.cpp
-        src/video_coding/video_encoder_factory.cpp
-        src/video_coding/video_encoder_impl.cpp)
-    target_link_libraries(video_codec osp log zlog libmhal.so)
+    target_link_libraries(video_codec osp log zlog libMemAdapter.so libvencoder.so)
     add_dependencies(video_codec log osp)
 endif()
 
@@ -308,28 +325,21 @@ if(BUILD_TUTORIALS)
 
     add_executable(tutorial_crash_test src/tutorial/tutorial_crash_test.cpp)
     target_link_libraries(tutorial_crash_test sysdbg_boost dl)
-
-    if(USE_RK_PLATFORM OR USE_AW_PLATFORM OR USE_AM311X_PLATFORM)
-        # ---- codec demo ----
-        # video_codec 已各自 link 底层编码库（RK=libVE 等, AW=libvencoder, AM311x=libmhal）
+    if(USE_RK_PLATFORM OR USE_AW_PLATFORM)
         add_executable(tutorial_codec src/tutorial/tutorial_codec.cpp)
-        target_link_libraries(tutorial_codec video_codec video_common dl)
+        target_link_libraries(tutorial_codec video_codec video_common libVE.so libcdc_base.so libvenc_codec.so libvenc_base.so dl)
         add_dependencies(tutorial_codec video_codec video_common)
-
-        # ---- capture demo ----
-        # video_capture link 了 libyuv，libyuv 二级依赖 libjpeg.so（标准 JPEG API）
+    
         add_executable(tutorial_capture src/tutorial/tutorial_capture.cpp)
-        target_link_libraries(tutorial_capture queue video_capture video_common
-            osp dl log zlog libjpeg.so)
+        target_link_libraries(tutorial_capture queue video_capture video_common osp dl log libjpeg.so  libturbojpeg.so zlog)
         add_dependencies(tutorial_capture queue video_capture video_common)
 
-        # ---- audio demos ----
         add_executable(tutorial_audio_capture src/tutorial/tutorial_audio_capture.cpp)
         target_link_libraries(tutorial_audio_capture audio_capture audio_resample audio_processor)
 
         add_executable(tutorial_audio_g711_encoder src/tutorial/tutorial_audio_g711_encoder.cpp)
         target_link_libraries(tutorial_audio_g711_encoder audio_coding)
-    endif()
+    endif() 
 endif()
 
 # ============================================================================
@@ -361,6 +371,13 @@ set(HEAD_FILES
     ${CMAKE_SOURCE_DIR}/include/audio_processor/audio_processor.h
 )
 
+if(ENABLE_WEBRTC_TRANSPORT)
+    list(APPEND HEAD_FILES
+        ${CMAKE_SOURCE_DIR}/include/webrtc_transport/webrtc_transport.h
+        ${CMAKE_SOURCE_DIR}/include/webrtc_transport/ws_signaling_client.h
+    )
+endif()
+
 INSTALL(FILES ${HEAD_FILES} DESTINATION ${CMAKE_INSTALL_PREFIX}/usr/include/)
 
 # 配置文件
@@ -370,19 +387,23 @@ INSTALL(DIRECTORY ${CMAKE_SOURCE_DIR}/conf
 
 # 动态库
 set(SHARED_COMMON_LIB log osp ringbuffer queue bus thread_pool shm_fifo sysdbg_boost)
-if(USE_RK_PLATFORM OR USE_AW_PLATFORM OR USE_AM311X_PLATFORM)
+if(USE_RK_PLATFORM OR USE_AW_PLATFORM)
     set(SHARED_MEDIA_LIB video_common video_capture video_codec)
 endif()
 
 # 安装所有库
-INSTALL(TARGETS ${SHARED_COMMON_LIB} ${SHARED_MEDIA_LIB} audio_capture audio_coding audio_resample audio_processor
+set(INSTALL_LIBS ${SHARED_COMMON_LIB} ${SHARED_MEDIA_LIB} audio_capture audio_coding audio_resample audio_processor)
+if(ENABLE_WEBRTC_TRANSPORT)
+    list(APPEND INSTALL_LIBS webrtc_transport)
+endif()
+INSTALL(TARGETS ${INSTALL_LIBS}
         LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/usr/lib
         ARCHIVE DESTINATION ${CMAKE_INSTALL_PREFIX}/usr/lib
         RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/usr/bin)
 
 # 安装可执行文件
 if(BUILD_TUTORIALS)
-    INSTALL(TARGETS tutorial_crash_test tutorial_codec tutorial_capture tutorial_audio_capture tutorial_audio_g711_encoder
+    INSTALL(TARGETS tutorial_crash_test tutorial_codec tutorial_audio_capture tutorial_audio_g711_encoder
             RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/usr/bin)
 endif()
 
@@ -397,8 +418,6 @@ if(USE_RK_PLATFORM)
     message(STATUS "  Target: RK Platform")
 elseif(USE_AW_PLATFORM)
     message(STATUS "  Target: Allwinner Platform")
-elseif(USE_AM311X_PLATFORM)
-    message(STATUS "  Target: AM311x Platform")
 endif()
 message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "  Build tutorials: ${BUILD_TUTORIALS}")

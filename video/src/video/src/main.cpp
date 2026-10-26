@@ -369,6 +369,48 @@ static int stop_rtsp_push_cb(struct ubus_context *ctx, struct ubus_object *obj,
     return 0;
 }
 
+#if defined(ENABLE_WEBRTC)
+static int start_webrtc_push_cb(struct ubus_context *ctx, struct ubus_object *obj,
+                                struct ubus_request_data *req, const char *method,
+                                struct blob_attr *msg)
+{
+    std::lock_guard<std::mutex> guard(g_main_lock);
+    ump_info("start_webrtc_push");
+
+    auto *engine = ecovacs::MediaEngine::MediaEngineInstance();
+    if (engine)
+    {
+        engine->StartWebrtcPush();
+    }
+
+    struct blob_buf b = {0};
+    blob_buf_init(&b, 0);
+    blobmsg_add_string(&b, "ret", "ok");
+    ubus_send_reply(ctx, req, b.head);
+    return 0;
+}
+
+static int stop_webrtc_push_cb(struct ubus_context *ctx, struct ubus_object *obj,
+                               struct ubus_request_data *req, const char *method,
+                               struct blob_attr *msg)
+{
+    std::lock_guard<std::mutex> guard(g_main_lock);
+    ump_info("stop_webrtc_push");
+
+    auto *engine = ecovacs::MediaEngine::MediaEngineInstance();
+    if (engine)
+    {
+        engine->StopWebrtcPush();
+    }
+
+    struct blob_buf b = {0};
+    blob_buf_init(&b, 0);
+    blobmsg_add_string(&b, "ret", "ok");
+    ubus_send_reply(ctx, req, b.head);
+    return 0;
+}
+#endif
+
 #if defined(ENABLE_LIBPEER)
 static int start_libpeer_push_cb(struct ubus_context *ctx, struct ubus_object *obj,
                                  struct ubus_request_data *req, const char *method,
@@ -467,25 +509,26 @@ static struct ubus_method control_methods[] = {
     {.name = "start_libpeer_push", .handler = start_libpeer_push_cb},
     {.name = "stop_libpeer_push", .handler = stop_libpeer_push_cb},
 #endif
+#if defined(ENABLE_WEBRTC)
+    {.name = "start_webrtc_push", .handler = start_webrtc_push_cb},
+    {.name = "stop_webrtc_push", .handler = stop_webrtc_push_cb},
+#endif
     {.name = "start_jpeg_pub", .handler = start_jpeg_pub_cb},
     {.name = "stop_jpeg_pub", .handler = stop_jpeg_pub_cb},
 };
 
-static struct ubus_object_type control_type;
+static struct ubus_object_type control_type = {
+    .name = "video.control",
+    .methods = control_methods,
+    .n_methods = ARRAY_SIZE(control_methods),
+};
 
-static struct ubus_object control_obj;
-
-static void init_ubus_objects()
-{
-    control_type.name = "video.control";
-    control_type.methods = control_methods;
-    control_type.n_methods = ARRAY_SIZE(control_methods);
-
-    control_obj.name = "video.control";
-    control_obj.type = &control_type;
-    control_obj.methods = control_methods;
-    control_obj.n_methods = ARRAY_SIZE(control_methods);
-}
+static struct ubus_object control_obj = {
+    .name = "video.control",
+    .type = &control_type,
+    .methods = control_methods,
+    .n_methods = ARRAY_SIZE(control_methods),
+};
 
 static void ubus_reconn_timer_cb(struct uloop_timeout *timeout, struct ubus_context *ctx)
 {
@@ -515,7 +558,6 @@ static void ubus_conn_lost_cb(struct ubus_context *ctx)
 
 static void ubus_server_main(struct ubus_context *ctx)
 {
-    init_ubus_objects();
     int ret = ubus_add_object(ctx, &control_obj);
     if (ret)
         ump_error("add object failed: %s", ubus_strerror(ret));

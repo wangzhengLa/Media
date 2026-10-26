@@ -3,7 +3,7 @@ PROJ_NAME = ump
 GIT_BRANCH = master
 GIT_VER := $(shell cat VERSION)
 PROJ_VER = $(GIT_BRANCH)
-PROJ_REL = 2
+PROJ_REL = 15
 PKG_NAME = $(PROJ_NAME)-$(PROJ_VER)-$(GIT_VER)-$(PROJ_REL)-$(HOST_ARCH)-$(FP_FLAG).pkg.tar.xz
 PROJECT = ${PROJECT_TYPE}
 
@@ -24,9 +24,7 @@ DEPS = \
     tinyxml2:fetchPkg \
     zlog:fetchPkg \
     speexdsp:fetchPkg \
-    webrtc-audio-processing:fetchPkg \
-	mhal:fetchPkg \
-	vpulib:fetchPkg
+    webrtc-audio-processing:fetchPkg
 
 fetchDeps:
 	@for dep in $(DEPS); do \
@@ -49,10 +47,10 @@ configure:
 	mkdir build && \
 	cd build && \
 	cmake ../ \
-	                -DUSE_RK_PLATFORM=OFF \
-					-DUSE_AW_PLATFORM=OFF \
-					-DUSE_AM311X_PLATFORM=ON \
-			-DCMAKE_BUILD_TYPE=Debug \
+                -DUSE_RK_PLATFORM=OFF \
+				-DUSE_AW_PLATFORM=ON \
+		-DENABLE_WEBRTC_TRANSPORT=ON \
+		-DCMAKE_BUILD_TYPE=Debug \
 			-DCMAKE_INSTALL_PREFIX=$(PLATFORM_DIR)/../$(PROJ_NAME)/install/root \
 			-DCMAKE_SYSTEM_NAME=Linux \
 			-DCMAKE_C_COMPILER=$(CROSS_COMPILE)gcc  \

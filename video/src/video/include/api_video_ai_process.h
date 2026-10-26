@@ -38,7 +38,6 @@ namespace ecovacs
                 uint32_t height;
                 uint32_t stride_y;
                 uint32_t stride_uv;
-                uint32_t format;       // 0=NV12, 1=RGB24
                 uint64_t timestamp;
                 std::vector<uint8_t> data;
 
@@ -46,7 +45,6 @@ namespace ecovacs
                 const uint8_t *uv_data() const { return data.data() + (width * height); }
                 uint32_t y_size() const { return width * height; }
                 uint32_t uv_size() const { return width * height / 2; }
-                uint32_t rgb_size() const { return width * height * 3; }
         };
 
         class VideoAI : public video_common::VideoSinkInterface

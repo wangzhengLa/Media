@@ -48,6 +48,13 @@ namespace ecovacs
     }
 #endif
 
+#if defined(ENABLE_WEBRTC)
+    std::unique_ptr<VideoWebrtcPushElement> VideoWebrtcPushElement::Create()
+    {
+        return std::make_unique<VideoWebrtcPushElement>();
+    }
+#endif
+
     std::unique_ptr<VideoAiProcessElement> VideoAiProcessElement::Create()
     {
         return std::make_unique<VideoAiProcessElement>();
@@ -145,29 +152,8 @@ namespace ecovacs
             capture_capability.height = cJSON_GetObjectItem(ptJsonTemp, "height")->valueint;
             capture_capability.fps = cJSON_GetObjectItem(ptJsonTemp, "fps")->valueint;
             capture_capability.device_index = cJSON_GetObjectItem(ptJsonTemp, "device_index")->valueint;
-            cJSON *ptCsiId = cJSON_GetObjectItem(ptJsonTemp, "csi_id");
-            if (ptCsiId)
-                capture_capability.csi_id = ptCsiId->valueint;
-            else
-                capture_capability.csi_id = -1;  // 默认自动
             capture_capability.camera_type = cJSON_GetObjectItem(ptJsonTemp, "camera_type")->valuestring;
             capture_capability.stream_property = cJSON_GetObjectItem(ptJsonTemp, "stream_property")->valuestring;
-
-            // stream_type: "fr"（默认）或 "ds"
-            cJSON *ptStreamType = cJSON_GetObjectItem(ptJsonTemp, "stream_type");
-            if (ptStreamType && ptStreamType->valuestring)
-                capture_capability.stream_type = ptStreamType->valuestring;
-            else
-                capture_capability.stream_type = "fr";
-            ump_info("ReadConfig: capture[%u] stream_type=%s\n", idx, capture_capability.stream_type.c_str());
-
-            // image_type: "YUYV"（默认）/"RGB"/"NV12"
-            cJSON *ptImageType = cJSON_GetObjectItem(ptJsonTemp, "image_type");
-            if (ptImageType && ptImageType->valuestring)
-                capture_capability.image_type = ptImageType->valuestring;
-            else
-                capture_capability.image_type = "YUYV";
-            ump_info("ReadConfig: capture[%u] image_type=%s\n", idx, capture_capability.image_type.c_str());
 
 #ifdef ENABLE_ISP
             cJSON *ptCamId = cJSON_GetObjectItem(ptJsonTemp, "cam_id");
@@ -223,31 +209,10 @@ namespace ecovacs
                 config->pusher_cfg_.audio_noise_level = ptNoiseLvl->valueint;
             else
                 config->pusher_cfg_.audio_noise_level = 0;
-
-            // AEC 相关配置（可选，无则用默认值）
-            cJSON *ptAecEnabled = cJSON_GetObjectItem(pPusherItem, "aec_enabled");
-            config->pusher_cfg_.aec_enabled = ptAecEnabled ? ptAecEnabled->valueint : 0;
-
-            cJSON *ptAudioDevice = cJSON_GetObjectItem(pPusherItem, "audio_device");
-            if (ptAudioDevice && ptAudioDevice->valuestring)
-                config->pusher_cfg_.audio_device = ptAudioDevice->valuestring;
-            else
-                config->pusher_cfg_.audio_device = "default";
-
-            cJSON *ptCaptureCh = cJSON_GetObjectItem(pPusherItem, "audio_capture_channels");
-            config->pusher_cfg_.audio_capture_channels =
-                ptCaptureCh ? ptCaptureCh->valueint : 8;
-
-            cJSON *ptMicCh = cJSON_GetObjectItem(pPusherItem, "audio_mic_channel");
-            config->pusher_cfg_.audio_mic_channel = ptMicCh ? ptMicCh->valueint : 0;
-
-            cJSON *ptRefCh = cJSON_GetObjectItem(pPusherItem, "audio_ref_channel");
-            config->pusher_cfg_.audio_ref_channel = ptRefCh ? ptRefCh->valueint : 5;
         }
         else
         {
             config->pusher_cfg_.audio_noise_level = 0;
-            config->pusher_cfg_.aec_enabled = 0;
         }
         ump_info("pusher_cfg: audio_noise_level=[%d]\r\n",
                  config->pusher_cfg_.audio_noise_level);
@@ -317,15 +282,8 @@ namespace ecovacs
             int32_t height = video_capture_source->device_capture_capability_.height;
             int32_t target_fps = video_capture_source->device_capture_capability_.fps;
             int32_t capture_device_index = video_capture_source->device_capture_capability_.device_index;
-            int32_t csi_id = video_capture_source->device_capture_capability_.csi_id;
-            std::string stream_type = video_capture_source->device_capture_capability_.stream_type;
-            std::string image_type = video_capture_source->device_capture_capability_.image_type;
-            ump_info("OpenCapture: stream_property=%s stream_type=%s image_type=%s csi_id=%d\n",
-                     video_capture_source->device_capture_capability_.stream_property.c_str(),
-                     stream_type.c_str(), image_type.c_str(), csi_id);
 
-            auto capture = VideoCapture::Create(width, height, target_fps, capture_device_index,
-                                                 csi_id, stream_type, image_type);
+            auto capture = VideoCapture::Create(width, height, target_fps, capture_device_index);
             if (!capture)
             {
                 ump_error("VideoCapture::Create failed\r\n");
@@ -457,23 +415,25 @@ namespace ecovacs
 
 #ifdef ENABLE_ISP
         IspManager::GetInstance().AddStream(capture_element->cam_id_);
+        ump_info("[ISP] AddStream done, cam_id=%d, capture_capabilitys size=%zu\n",
+                 capture_element->cam_id_,
+                 media_engine_cfg_.capture_cfg_.capture_capabilitys_.size());
+        if (!media_engine_cfg_.capture_cfg_.capture_capabilitys_.empty())
+        {
+            int32_t target_fps = media_engine_cfg_.capture_cfg_.capture_capabilitys_[0].fps;
+            ump_info("[ISP] calling SetFrameRate cam_id=%d fps=%d\n",
+                     capture_element->cam_id_, target_fps);
+            int32_t ret = IspManager::GetInstance().SetFrameRate(capture_element->cam_id_, target_fps);
+            ump_info("[ISP] SetFrameRate returned %d\n", ret);
+        }
+        else
+        {
+            ump_error("[ISP] capture_capabilitys is empty, skip SetFrameRate\n");
+        }
 #endif
 
         ecovacs::video_common::VideoCodecConfig video_codec_config;
-        // 编码器 frameType 需与 IncomingFrame 输出的 buffer 类型一致：
-        //   YUYV → 直通 kYUY2
-        //   NV12 → 直通 kNV12
-        //   RGB/I420/UYVY → IncomingFrame 转成 kNV12
-#if defined(AM311X_PLATFORM)
-        const std::string &img_type = capture_element->device_capture_capability_.image_type;
-        if (img_type == "YUYV" || img_type == "YUY2") {
-            video_codec_config.frameType = video_common::FrameType::kYUY2;
-        } else {
-            video_codec_config.frameType = video_common::FrameType::kNV12;
-        }
-#else
         video_codec_config.frameType = video_common::FrameType::kNV12;
-#endif
         video_codec_config.codecType = video_common::VideoCodecType::kVideoCodecH264;
         video_codec_config.complexity_ = video_common::VideoCodecComplexity::kComplexityNormal;
         video_codec_config.width = media_engine_cfg_.encoder_cfg_.width;
@@ -618,20 +578,7 @@ namespace ecovacs
 #endif
 
         ecovacs::video_common::VideoCodecConfig video_codec_config;
-        // 编码器 frameType 需与 IncomingFrame 输出的 buffer 类型一致：
-        //   YUYV → 直通 kYUY2
-        //   NV12 → 直通 kNV12
-        //   RGB/I420/UYVY → IncomingFrame 转成 kNV12
-#if defined(AM311X_PLATFORM)
-        const std::string &img_type = capture_element->device_capture_capability_.image_type;
-        if (img_type == "YUYV" || img_type == "YUY2") {
-            video_codec_config.frameType = video_common::FrameType::kYUY2;
-        } else {
-            video_codec_config.frameType = video_common::FrameType::kNV12;
-        }
-#else
         video_codec_config.frameType = video_common::FrameType::kNV12;
-#endif
         video_codec_config.codecType = video_common::VideoCodecType::kVideoCodecH264;
         video_codec_config.complexity_ = video_common::VideoCodecComplexity::kComplexityNormal;
         video_codec_config.width = media_engine_cfg_.encoder_cfg_.width;
@@ -685,13 +632,6 @@ namespace ecovacs
             push->SetAudioNoiseLevel(media_engine_cfg_.pusher_cfg_.audio_noise_level);
             ump_info("RTSP push: audio_noise_level=[%d]\r\n",
                      media_engine_cfg_.pusher_cfg_.audio_noise_level);
-
-            // AEC / 采集配置透传
-            push->SetAudioDevice(media_engine_cfg_.pusher_cfg_.audio_device);
-            push->SetAudioCaptureChannels(media_engine_cfg_.pusher_cfg_.audio_capture_channels);
-            push->SetAudioMicChannel(media_engine_cfg_.pusher_cfg_.audio_mic_channel);
-            push->SetAudioRefChannel(media_engine_cfg_.pusher_cfg_.audio_ref_channel);
-            push->SetAecEnabled(media_engine_cfg_.pusher_cfg_.aec_enabled != 0);
 
 #if defined(USE_LIVE555_RTSP)
             video_rtsp_push_element_->video_push_ = std::shared_ptr<VideoLive555Push>(push.release());
@@ -799,20 +739,7 @@ namespace ecovacs
 #endif
 
         ecovacs::video_common::VideoCodecConfig video_codec_config;
-        // 编码器 frameType 需与 IncomingFrame 输出的 buffer 类型一致：
-        //   YUYV → 直通 kYUY2
-        //   NV12 → 直通 kNV12
-        //   RGB/I420/UYVY → IncomingFrame 转成 kNV12
-#if defined(AM311X_PLATFORM)
-        const std::string &img_type = capture_element->device_capture_capability_.image_type;
-        if (img_type == "YUYV" || img_type == "YUY2") {
-            video_codec_config.frameType = video_common::FrameType::kYUY2;
-        } else {
-            video_codec_config.frameType = video_common::FrameType::kNV12;
-        }
-#else
         video_codec_config.frameType = video_common::FrameType::kNV12;
-#endif
         video_codec_config.codecType = video_common::VideoCodecType::kVideoCodecH264;
         video_codec_config.complexity_ = video_common::VideoCodecComplexity::kComplexityNormal;
         video_codec_config.width = media_engine_cfg_.encoder_cfg_.width;
@@ -911,16 +838,190 @@ namespace ecovacs
 
         video_libpeer_push_element_.reset();
 
-        // 如果 RTSP 也停了（只剩 libpeer 一路用 capture/encode），就一起停
+        // 如果其他推流（rtsp/webrtc）也停了，就一起停 encode
+#if defined(ENABLE_WEBRTC)
+        bool encode_shared = (video_rtsp_push_element_ != nullptr) ||
+                             (video_webrtc_push_element_ != nullptr);
+#else
         bool encode_shared = (video_rtsp_push_element_ != nullptr);
+#endif
         if (!encode_shared && video_encode_element_ && video_encode_element_->video_h264_encode_) {
             if (video_encode_element_->video_h264_encode_->EncodeStarted())
                 video_encode_element_->video_h264_encode_->StopEncode();
         }
 
-        // 只有 RTSP 和 libpeer 都停了才停 capture
+        // 所有推流都停了才停 capture
         VideoCaptureElement *capture_element = FindCaptureElem("living");
-        bool any_push = (video_rtsp_push_element_ != nullptr) || (video_libpeer_push_element_ != nullptr);
+#if defined(ENABLE_WEBRTC)
+        bool any_push = (video_rtsp_push_element_ != nullptr) ||
+                        (video_webrtc_push_element_ != nullptr);
+#else
+        bool any_push = (video_rtsp_push_element_ != nullptr);
+#endif
+        if (!any_push && capture_element && !capture_element->video_capture_broadcaster_->frame_wanted()) {
+            if (capture_element->video_capture_->CaptureStarted())
+                capture_element->video_capture_->StopCapture();
+        }
+
+        return 0;
+    }
+#endif
+
+#if defined(ENABLE_WEBRTC)
+    // ========== 官方裁剪栈 WebRTC 推流（骨架：无信令） ==========
+    int32_t MediaEngine::StartWebrtcPush()
+    {
+        std::lock_guard<std::mutex> guard(api_lock_);
+
+        VideoCaptureElement *capture_element = FindCaptureElem("living");
+        if (!capture_element)
+            return -1;
+
+#ifdef ENABLE_ISP
+        IspManager::GetInstance().AddStream(capture_element->cam_id_);
+        ump_info("[ISP] AddStream done, cam_id=%d, capture_capabilitys size=%zu\n",
+                 capture_element->cam_id_,
+                 media_engine_cfg_.capture_cfg_.capture_capabilitys_.size());
+        if (!media_engine_cfg_.capture_cfg_.capture_capabilitys_.empty())
+        {
+            int32_t target_fps = media_engine_cfg_.capture_cfg_.capture_capabilitys_[0].fps;
+            ump_info("[ISP] calling SetFrameRate cam_id=%d fps=%d\n",
+                     capture_element->cam_id_, target_fps);
+            int32_t ret = IspManager::GetInstance().SetFrameRate(capture_element->cam_id_, target_fps);
+            ump_info("[ISP] SetFrameRate returned %d\n", ret);
+        }
+        else
+        {
+            ump_error("[ISP] capture_capabilitys is empty, skip SetFrameRate\n");
+        }
+#endif
+
+        ecovacs::video_common::VideoCodecConfig video_codec_config;
+        video_codec_config.frameType = video_common::FrameType::kNV12;
+        video_codec_config.codecType = video_common::VideoCodecType::kVideoCodecH264;
+        video_codec_config.complexity_ = video_common::VideoCodecComplexity::kComplexityNormal;
+        video_codec_config.width = media_engine_cfg_.encoder_cfg_.width;
+        video_codec_config.height = media_engine_cfg_.encoder_cfg_.height;
+        video_codec_config.crop_x = media_engine_cfg_.encoder_cfg_.crop_x;
+        video_codec_config.crop_y = media_engine_cfg_.encoder_cfg_.crop_y;
+        video_codec_config.maxFramerate = media_engine_cfg_.encoder_cfg_.max_fps;
+        video_codec_config.maxBitrate = media_engine_cfg_.encoder_cfg_.max_bps;
+        video_codec_config.minBitrate = media_engine_cfg_.encoder_cfg_.min_bps;
+        video_codec_config.initBitrate = media_engine_cfg_.encoder_cfg_.init_bps;
+        video_codec_config.codec_specific_.H264.init_qp = media_engine_cfg_.encoder_cfg_.init_qp;
+        video_codec_config.codec_specific_.H264.min_qp = media_engine_cfg_.encoder_cfg_.min_qp;
+        video_codec_config.codec_specific_.H264.max_qp = media_engine_cfg_.encoder_cfg_.max_qp;
+        video_codec_config.codec_specific_.H264.gop = media_engine_cfg_.encoder_cfg_.gop;
+        video_codec_config.codec_specific_.H264.profile = ecovacs::video_common::VideoCodecProfile::kProfileBase;
+
+        if (!video_encode_element_)
+        {
+            video_encode_element_ = VideoH264EncodeElement::Create();
+            if (!video_encode_element_)
+                return -1;
+
+            auto encode = VideoEncode::Create(&video_codec_config);
+            if (!encode)
+                return -1;
+            video_encode_element_->video_h264_encode_ = std::shared_ptr<VideoEncode>(encode.release());
+
+            video_encode_element_->video_encode_broadcaster_ = VideoEncodeBroadcaster::Create();
+            if (!video_encode_element_->video_encode_broadcaster_)
+                return -1;
+
+            capture_element->video_capture_broadcaster_->AddOrUpdateSink(
+                video_encode_element_->video_h264_encode_);
+            video_encode_element_->video_h264_encode_->RegisterEncodeCompleteCallback(
+                video_encode_element_->video_encode_broadcaster_.get());
+        }
+
+        if (!video_webrtc_push_element_)
+        {
+            video_webrtc_push_element_ = VideoWebrtcPushElement::Create();
+            if (!video_webrtc_push_element_)
+                return -1;
+
+            auto push = VideoWebrtcPush::Create();
+            if (!push)
+                return -1;
+            video_webrtc_push_element_->video_push_ = std::shared_ptr<VideoWebrtcPush>(push.release());
+        }
+
+        capture_element->video_capture_broadcaster_->AddOrUpdateSink(
+            video_encode_element_->video_h264_encode_);
+        video_encode_element_->video_encode_broadcaster_->AddOrUpdateSink(
+            video_webrtc_push_element_->video_push_);
+        // Let the WebRTC stack drive the hardware encoder bitrate (GCC).
+        video_webrtc_push_element_->video_push_->SetVideoEncode(
+            video_encode_element_->video_h264_encode_);
+
+        if (!capture_element->video_capture_->CaptureStarted())
+        {
+            capture_element->video_capture_->StartCapture();
+        }
+
+        if (capture_element->video_capture_->CaptureStarted())
+        {
+#if defined(AW_PLATFORM)
+            AllWinnerIsp::GetInstance().Start(
+                capture_element->device_capture_capability_.device_index);
+#endif
+        }
+
+        if (!video_encode_element_->video_h264_encode_->EncodeStarted())
+        {
+            video_encode_element_->video_h264_encode_->StartEncode();
+        }
+
+        if (!video_webrtc_push_element_->video_push_->PushStarted())
+        {
+            // 从配置中读取降噪等级
+            video_webrtc_push_element_->video_push_->SetAudioNoiseLevel(
+                media_engine_cfg_.pusher_cfg_.audio_noise_level);
+            ump_info("[webrtc] push: audio_noise_level=[%d]\r\n",
+                     media_engine_cfg_.pusher_cfg_.audio_noise_level);
+
+            video_webrtc_push_element_->video_push_->StartPush();
+        }
+
+        return 0;
+    }
+
+    int32_t MediaEngine::StopWebrtcPush()
+    {
+        std::lock_guard<std::mutex> guard(api_lock_);
+
+        if (video_webrtc_push_element_ && video_webrtc_push_element_->video_push_) {
+            if (video_webrtc_push_element_->video_push_->PushStarted())
+                video_webrtc_push_element_->video_push_->StopPush();
+        }
+
+        if (video_encode_element_ && video_encode_element_->video_encode_broadcaster_ && video_webrtc_push_element_) {
+            video_encode_element_->video_encode_broadcaster_->RemoveSink(
+                video_webrtc_push_element_->video_push_);
+        }
+
+        video_webrtc_push_element_.reset();
+
+        // rtsp/libpeer 都停了才停 encode
+#if defined(ENABLE_LIBPEER)
+        bool encode_shared = (video_rtsp_push_element_ != nullptr) ||
+                             (video_libpeer_push_element_ != nullptr);
+#else
+        bool encode_shared = (video_rtsp_push_element_ != nullptr);
+#endif
+        if (!encode_shared && video_encode_element_ && video_encode_element_->video_h264_encode_) {
+            if (video_encode_element_->video_h264_encode_->EncodeStarted())
+                video_encode_element_->video_h264_encode_->StopEncode();
+        }
+
+        VideoCaptureElement *capture_element = FindCaptureElem("living");
+#if defined(ENABLE_LIBPEER)
+        bool any_push = (video_rtsp_push_element_ != nullptr) ||
+                        (video_libpeer_push_element_ != nullptr);
+#else
+        bool any_push = (video_rtsp_push_element_ != nullptr);
+#endif
         if (!any_push && capture_element && !capture_element->video_capture_broadcaster_->frame_wanted()) {
             if (capture_element->video_capture_->CaptureStarted())
                 capture_element->video_capture_->StopCapture();
@@ -935,7 +1036,7 @@ namespace ecovacs
     {
         std::lock_guard<std::mutex> guard(api_lock_);
 
-        VideoCaptureElement *capture_element = FindCaptureElem("ai");
+        VideoCaptureElement *capture_element = FindCaptureElem("living");
         if (!capture_element)
             return -1;
 
@@ -986,7 +1087,7 @@ namespace ecovacs
     {
         std::lock_guard<std::mutex> guard(api_lock_);
 
-        VideoCaptureElement *capture_element = FindCaptureElem("ai");
+        VideoCaptureElement *capture_element = FindCaptureElem("living");
         if (!capture_element)
             return -1;
 
@@ -1053,17 +1154,7 @@ namespace ecovacs
 #endif
 
         ecovacs::video_common::VideoCodecConfig video_codec_config;
-#if defined(AM311X_PLATFORM)
-        // JPEG 编码用 living 路，frameType 需与 IncomingFrame 输出一致
-        const std::string &img_type = capture_element->device_capture_capability_.image_type;
-        if (img_type == "YUYV" || img_type == "YUY2") {
-            video_codec_config.frameType = video_common::FrameType::kYUY2;
-        } else {
-            video_codec_config.frameType = video_common::FrameType::kNV12;
-        }
-#else
         video_codec_config.frameType = video_common::FrameType::kNV12;
-#endif
         video_codec_config.codecType = video_common::VideoCodecType::kVideoCodecJPEG;
         video_codec_config.complexity_ = video_common::VideoCodecComplexity::kComplexityNormal;
         video_codec_config.width = media_engine_cfg_.encoder_cfg_.width;
@@ -1109,10 +1200,7 @@ namespace ecovacs
         capture_element->video_capture_broadcaster_->AddOrUpdateSink(video_photograph_element_->video_jpeg_encode_);
         video_photograph_element_->video_encode_broadcaster_->AddOrUpdateSink(jpeg_pic_upload_element_->jpeg_upload_);
 
-        // 记录 FR 流是否在抓拍前已经运行
-        bool fr_already_running = capture_element->video_capture_->CaptureStarted();
-
-        if (!fr_already_running)
+        if (!capture_element->video_capture_->CaptureStarted())
         {
             capture_element->video_capture_->StartCapture();
         }
@@ -1127,19 +1215,6 @@ namespace ecovacs
 
         if (!video_photograph_element_->video_jpeg_encode_->EncodeStarted())
         {
-#if defined(AM311X_PLATFORM)
-            if (!fr_already_running) {
-                // AM311x: FR 流刚启动，ISP 有预热帧（绿色），跳过前 30 帧再编码
-                video_photograph_element_->video_jpeg_encode_->SetSkipFrames(30);
-                ump_info("StartTakePhotograph: FR just started, skip 30 warmup frames\n");
-            } else {
-                // FR 流已在运行（推流常开），直接编码，实时抓拍
-                video_photograph_element_->video_jpeg_encode_->SetSkipFrames(0);
-                ump_info("StartTakePhotograph: FR already running, realtime capture\n");
-            }
-#else
-            video_photograph_element_->video_jpeg_encode_->SetSkipFrames(0);
-#endif
             video_photograph_element_->video_jpeg_encode_->StartEncode();
         }
 
@@ -1325,17 +1400,7 @@ namespace ecovacs
 #endif
 
         ecovacs::video_common::VideoCodecConfig video_codec_config;
-#if defined(AM311X_PLATFORM)
-        // JPEG 编码用 living 路，frameType 需与 IncomingFrame 输出一致
-        const std::string &img_type = capture_element->device_capture_capability_.image_type;
-        if (img_type == "YUYV" || img_type == "YUY2") {
-            video_codec_config.frameType = video_common::FrameType::kYUY2;
-        } else {
-            video_codec_config.frameType = video_common::FrameType::kNV12;
-        }
-#else
         video_codec_config.frameType = video_common::FrameType::kNV12;
-#endif
         video_codec_config.codecType = video_common::VideoCodecType::kVideoCodecJPEG;
         video_codec_config.complexity_ = video_common::VideoCodecComplexity::kComplexityNormal;
         video_codec_config.width = media_engine_cfg_.encoder_cfg_.width;

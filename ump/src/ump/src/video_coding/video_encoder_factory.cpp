@@ -3,8 +3,6 @@
 #include "rk_encoder_impl.h"
 #elif AW_PLATFORM
 #include "allwinner_encoder_impl.h"
-#elif defined(AM311X_PLATFORM)
-#include "am311x_encoder_impl.h"
 #endif
 
 namespace ecovacs
@@ -16,9 +14,6 @@ namespace ecovacs
         return implementation;
 #elif AW_PLATFORM
         auto implementation = new AllWinnerEncoderImpl();
-        return implementation;
-#elif defined(AM311X_PLATFORM)
-        auto implementation = new Am311xEncoderImpl();
         return implementation;
 #endif
         return nullptr;
