@@ -16,8 +16,6 @@
 
 #include "api/audio/audio_device.h"
 #include "api/audio/audio_device_defines.h"
-#include "api/audio_codecs/audio_decoder.h"
-#include "api/audio_codecs/audio_decoder_factory.h"
 #include "api/audio_codecs/audio_encoder.h"
 #include "api/audio_codecs/audio_encoder_factory.h"
 #include "api/audio_codecs/audio_format.h"
@@ -30,17 +28,18 @@ namespace ecovacs {
 namespace wt {
 
 // =====================================================================
-//  External G711 encoder: injects pre-encoded G.711 (PCMA) frames into
+//  External audio encoder: injects pre-encoded audio frames into
 //  libwebrtc's audio RTP pipeline.  Encode() ignores the input PCM and
-//  returns a frame from the internal queue (fed by SendG711Frame).
+//  returns a frame from the internal queue (fed by FeedAudioFrame).
+//  Current codec: G.711 PCMA (8kHz mono).
 // =====================================================================
-class ExternalG711Encoder : public webrtc::AudioEncoder {
+class ExternalAudioEncoder : public webrtc::AudioEncoder {
 public:
     struct Registry {
-        ExternalG711Encoder* active = nullptr;
+        ExternalAudioEncoder* active = nullptr;
     };
-    explicit ExternalG711Encoder(std::shared_ptr<Registry> r, int payload_type);
-    ~ExternalG711Encoder() override;
+    explicit ExternalAudioEncoder(std::shared_ptr<Registry> r, int payload_type);
+    ~ExternalAudioEncoder() override;
 
     // webrtc::AudioEncoder interface
     int SampleRateHz() const override;
@@ -51,8 +50,8 @@ public:
     void Reset() override;
     std::optional<std::pair<webrtc::TimeDelta, webrtc::TimeDelta>> GetFrameLengthRange() const override;
 
-    // Called by the send loop to inject a pre-encoded G.711 frame.
-    void FeedG711Frame(const uint8_t* data, size_t size);
+    // Called by the transport to inject a pre-encoded audio frame.
+    void FeedAudioFrame(const uint8_t* data, size_t size);
 
 protected:
     EncodedInfo EncodeImpl(uint32_t rtp_timestamp,
@@ -67,9 +66,9 @@ private:
     int payload_type_ = 0;
 };
 
-class ExternalG711EncoderFactory : public webrtc::AudioEncoderFactory {
+class ExternalAudioEncoderFactory : public webrtc::AudioEncoderFactory {
 public:
-    explicit ExternalG711EncoderFactory(std::shared_ptr<ExternalG711Encoder::Registry> r);
+    explicit ExternalAudioEncoderFactory(std::shared_ptr<ExternalAudioEncoder::Registry> r);
     std::vector<webrtc::AudioCodecSpec> GetSupportedEncoders() override;
     std::optional<webrtc::AudioCodecInfo> QueryAudioEncoder(const webrtc::SdpAudioFormat&) override;
     std::unique_ptr<webrtc::AudioEncoder> Create(
@@ -81,14 +80,14 @@ public:
         return webrtc::RefCountReleaseStatus::kOtherRefsRemained;
     }
 private:
-    std::shared_ptr<ExternalG711Encoder::Registry> registry_;
+    std::shared_ptr<ExternalAudioEncoder::Registry> registry_;
     mutable std::atomic<int> ref_count_{0};
 };
 
 // =====================================================================
 //  Fake ADM: produces silent 10ms PCM blocks at 8kHz to drive the
-//  audio encode pipeline.  The real G.711 payload is injected via
-//  ExternalG711Encoder (which ignores this silence).
+//  audio encode pipeline.  The real audio payload is injected via
+//  ExternalAudioEncoder (which ignores this silence).
 // =====================================================================
 class FakeAudioDeviceModule : public webrtc::AudioDeviceModule {
 public:
@@ -122,7 +121,7 @@ public:
     bool Playing() const override { return playing_; }
     int32_t StartRecording() override;
     int32_t StopRecording() override;
-    bool Recording() const override { return recording_; }
+    bool Recording() const override { return capture_; }
 
     int32_t InitSpeaker() override { return 0; }
     bool SpeakerIsInitialized() const override { return true; }
@@ -170,47 +169,11 @@ private:
     void CaptureThread();
     webrtc::AudioTransport* audio_cb_ = nullptr;
     std::thread cap_thread_;
-    std::atomic<bool> recording_{false};
+    std::atomic<bool> capture_{false};
     bool initialized_ = false;
     bool playout_init_ = false;
     bool rec_init_ = false;
     bool playing_ = false;
-    mutable std::atomic<int> ref_count_{0};
-};
-
-// =====================================================================
-//  Empty audio encoder/decoder factories: used when audio is disabled
-//  or when we don't yet support a given direction.
-// =====================================================================
-class EmptyAudioEncoderFactory : public webrtc::AudioEncoderFactory {
-public:
-    std::vector<webrtc::AudioCodecSpec> GetSupportedEncoders() override { return {}; }
-    std::optional<webrtc::AudioCodecInfo> QueryAudioEncoder(const webrtc::SdpAudioFormat&) override { return std::nullopt; }
-    std::unique_ptr<webrtc::AudioEncoder> Create(
-        const webrtc::Environment&, const webrtc::SdpAudioFormat&,
-        Options) override { return nullptr; }
-    void AddRef() const override { ++ref_count_; }
-    webrtc::RefCountReleaseStatus Release() const override {
-        if (--ref_count_ == 0) { delete this; return webrtc::RefCountReleaseStatus::kDroppedLastRef; }
-        return webrtc::RefCountReleaseStatus::kOtherRefsRemained;
-    }
-private:
-    mutable std::atomic<int> ref_count_{0};
-};
-
-class EmptyAudioDecoderFactory : public webrtc::AudioDecoderFactory {
-public:
-    std::vector<webrtc::AudioCodecSpec> GetSupportedDecoders() override { return {}; }
-    bool IsSupportedDecoder(const webrtc::SdpAudioFormat&) override { return false; }
-    std::unique_ptr<webrtc::AudioDecoder> Create(
-        const webrtc::Environment&, const webrtc::SdpAudioFormat&,
-        std::optional<webrtc::AudioCodecPairId>) override { return nullptr; }
-    void AddRef() const override { ++ref_count_; }
-    webrtc::RefCountReleaseStatus Release() const override {
-        if (--ref_count_ == 0) { delete this; return webrtc::RefCountReleaseStatus::kDroppedLastRef; }
-        return webrtc::RefCountReleaseStatus::kOtherRefsRemained;
-    }
-private:
     mutable std::atomic<int> ref_count_{0};
 };
 

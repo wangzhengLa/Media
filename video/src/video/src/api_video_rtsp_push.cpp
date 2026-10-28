@@ -273,8 +273,8 @@ namespace ecovacs
             // ---------- 3. RTSP 推流（拆分 NALU，分开发送） ----------
             if (rtsp_started_.load(std::memory_order_acquire)) {
                 std::lock_guard<std::mutex> rtsp_lock(rtsp_mutex_);
-                if (rtsp_server_ && rtsp_session_id_ != 0 &&
-                    rtsp_client_count_.load(std::memory_order_acquire) > 0) {
+                uint32_t cli_cnt = rtsp_client_count_.load(std::memory_order_acquire);
+                if (rtsp_server_ && rtsp_session_id_ != 0 && cli_cnt > 0) {
 
                     // 获取当前时间（微秒）
                     int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -285,6 +285,7 @@ namespace ecovacs
 
                     // 遍历整个 frame，逐个拆出 NALU 分别发送
                     uint32_t offset = 0;
+                    bool has_idr = false;  // 当前帧是否包含 IDR，用于缓存
                     while (offset < frame_size) {
                         // 查找起始码（支持 3/4 字节）
                         int start_len = 0;
@@ -348,10 +349,24 @@ namespace ecovacs
                             // 所有 NALU 共用同一时间戳
                             frame.timestamp = common_ts;
 
-                            // 只有 IDR(5) 才是 I 帧，SPS(7)/PPS(8) 均按 P 帧推
+                            // SPS(7)/PPS(8)/IDR(5) 都标记为 I 帧。
+                            // 原因：xop 的 RtpConnection 只有收到 frame_type==I 时才将
+                            // has_key_frame_ 置 true，在此之前的所有包都会被丢弃。
+                            // 若 SPS/PPS 标记为 P，则它们会在 IDR 之前被丢弃，导致
+                            // 客户端只收到 IDR 而没有 SPS/PPS，无法解码。
                             uint8_t nalu_type = frame_data[nalu_start] & 0x1F;
-                            if (nalu_type == 5) {
+                            if (nalu_type == 5 || nalu_type == 7 || nalu_type == 8) {
                                 frame.type = xop::VIDEO_FRAME_I;
+                                if (nalu_type == 5) has_idr = true;
+
+                                const char *nalu_name = "?";
+                                switch (nalu_type) {
+                                    case 5:  nalu_name = "IDR";  break;
+                                    case 7:  nalu_name = "SPS";  break;
+                                    case 8:  nalu_name = "PPS";  break;
+                                }
+                                ump_info("[RTSP PUSH] nalu=%s type=%u size=%u ts=%u frame_type=I\n",
+                                         nalu_name, nalu_type, nalu_size, common_ts);
                             } else {
                                 frame.type = xop::VIDEO_FRAME_P;
                             }
@@ -365,6 +380,25 @@ namespace ecovacs
                             break;
                         }
                     } // while 拆 NALU 结束
+
+                    // 打印 IDR 帧信息，验证 GOP 是否生效
+                    if (has_idr) {
+                        static uint32_t s_last_idr_ts = 0;
+                        static uint64_t s_idr_count = 0;
+                        s_idr_count++;
+                        if (s_last_idr_ts != 0) {
+                            uint32_t diff_ts = common_ts - s_last_idr_ts;
+                            uint32_t gop_frames = diff_ts * 30 / 90000;  // 90kHz 时间戳，30fps
+                            ump_info("[GOP] IDR #%llu: ts=%u size=%u, "
+                                     "delta_ts=%u (%.2fms), estimated_gop=%u frames\n",
+                                     (unsigned long long)s_idr_count, common_ts, frame_size,
+                                     diff_ts, diff_ts / 90.0, gop_frames);
+                        } else {
+                            ump_info("[GOP] IDR #%llu: ts=%u size=%u (first IDR)\n",
+                                     (unsigned long long)s_idr_count, common_ts, frame_size);
+                        }
+                        s_last_idr_ts = common_ts;
+                    }
                 }
             }
 
@@ -431,7 +465,7 @@ namespace ecovacs
 
         xop::MediaSession* session = xop::MediaSession::CreateNew(config.suffix);
         session->AddSource(xop::channel_0, xop::H264Source::CreateNew(config.framerate));
-        session->AddSource(xop::channel_1, xop::G711ASource::CreateNew());  // 音频 G711A (PCMA), 8kHz mono
+         session->AddSource(xop::channel_1, xop::G711ASource::CreateNew());  // 音频 G711A (PCMA), 8kHz mono
 
         session->AddNotifyConnectedCallback([this](xop::MediaSessionId, std::string ip, uint16_t port) {
             uint32_t count = ++rtsp_client_count_;
@@ -509,6 +543,9 @@ namespace ecovacs
             return;
         }
 
+        uint8_t *frame_data = encoded_image->data();
+        uint32_t frame_size = encoded_image->size();
+
         // 入队（队列满时丢最旧帧，保证最新帧能入队）
         TH264Buffer *ptFrame = (TH264Buffer *)IntelliGetBuffer(
             &h264_buf_hndl_, IPC_INTELLI_EMPTY_BUFFER_FLAG, IPC_INTELLI_TIMEOUT_NONE);
@@ -529,7 +566,10 @@ namespace ecovacs
         }
 
         // IDR 帧插入 SPS/PPS
-        if (5 == (encoded_image->data()[4] & 0x1F)) {
+        // 判断逻辑：检查 data()[4]（假设前4字节是start code）是否为 IDR(type=5)
+        bool is_idr_by_data = (frame_size >= 5 && (frame_data[4] & 0x1F) == 5);
+
+        if (is_idr_by_data) {
             uint32_t h264_size = encoded_image->size();
             uint32_t sps_pps_size = codec_specific_info->codecSpecific.H264.sps_pps_len;
             uint8_t *h264_data = encoded_image->data();
@@ -554,26 +594,37 @@ namespace ecovacs
 
     bool VideoRtspPush::AudioInit()
     {
-        // 1. 创建 ring buffer
+        // 1. 创建 ring buffer（mic）
         audio_ring_buf_ = ringbuffer_create(AUDIO_RING_BUFFER_SIZE);
         if (!audio_ring_buf_) {
             ump_error("audio: ringbuffer_create failed\n");
             return false;
         }
 
+        // 1b. 创建参考声道 ring buffer（AEC 用，与 mic 严格对齐）
+        audio_ref_buf_ = ringbuffer_create(AUDIO_RING_BUFFER_SIZE);
+        if (!audio_ref_buf_) {
+            ump_error("audio: ref ringbuffer_create failed\n");
+            ringbuffer_destroy(audio_ring_buf_);
+            audio_ring_buf_ = nullptr;
+            return false;
+        }
+
         // 2. 初始化重采样器
-        if (!audio_resampler_.Init(AUDIO_INPUT_CHANNELS, AUDIO_INPUT_RATE,
+        if (!audio_resampler_.Init(AUDIO_PROC_CHANNELS, AUDIO_INPUT_RATE,
                                    AUDIO_OUTPUT_RATE, 3)) {
             ump_error("audio: resampler init failed\n");
             ringbuffer_destroy(audio_ring_buf_);
             audio_ring_buf_ = nullptr;
+            ringbuffer_destroy(audio_ref_buf_);
+            audio_ref_buf_ = nullptr;
             return false;
         }
 
         // 3. audio_processor 延后到 AudioStart 里根据 audio_noise_level_ 动态创建
 
         ump_info("audio: init OK (in=%dHz ch=%d, out=%dHz ch=%d, ring=%u bytes)\n",
-                 AUDIO_INPUT_RATE, AUDIO_INPUT_CHANNELS,
+                 AUDIO_INPUT_RATE, AUDIO_PROC_CHANNELS,
                  AUDIO_OUTPUT_RATE, AUDIO_OUTPUT_CHANNELS,
                  AUDIO_RING_BUFFER_SIZE);
         return true;
@@ -584,6 +635,10 @@ namespace ecovacs
         if (audio_ring_buf_) {
             ringbuffer_destroy(audio_ring_buf_);
             audio_ring_buf_ = nullptr;
+        }
+        if (audio_ref_buf_) {
+            ringbuffer_destroy(audio_ref_buf_);
+            audio_ref_buf_ = nullptr;
         }
         if (audio_processor_) {
             audio_processor_destroy(audio_processor_);
@@ -624,10 +679,9 @@ namespace ecovacs
             });
 
         // 2. 初始化 ALSA 采集
-        //    板卡 card 1 = snddmic (数字麦克风)，device 0
-        //    单声道采集（AudioCaptureCallback 里 channels==1 直接 memcpy，不需要 downmix）
-        if (!audio_recorder_.Init("plughw:1,0", AUDIO_INPUT_RATE, AUDIO_INPUT_CHANNELS,
-                                   AUDIO_FRAME_MS, 64)) {
+        //    AEC 需要多声道参考：设备/声道数由配置决定（默认 default/8ch，ch0=mic、ch5=ref）
+        if (!audio_recorder_.Init(audio_device_.c_str(), AUDIO_INPUT_RATE,
+                                  audio_capture_channels_, AUDIO_FRAME_MS, 64)) {
             ump_error("audio: AlsaRecorder init failed: %s\n",
                       audio_recorder_.GetLastError().c_str());
             return false;
@@ -683,6 +737,9 @@ namespace ecovacs
         if (audio_ring_buf_) {
             ringbuffer_reset(audio_ring_buf_);
         }
+        if (audio_ref_buf_) {
+            ringbuffer_reset(audio_ref_buf_);
+        }
 
         ump_info("audio: stopped\n");
     }
@@ -694,37 +751,47 @@ namespace ecovacs
         if (!audio_ring_buf_ || !audio_running_.load(std::memory_order_acquire))
             return;
 
+        if (channels <= 0) return;
         size_t total_samples = bytes / sizeof(int16_t);
         size_t mono_samples = total_samples / channels;
 
         // 栈上临时缓冲（避免每帧 malloc）
-        int16_t mono_buf[4096];  // 足够装 20ms @ 16kHz mono = 320 samples
-        if (mono_samples > sizeof(mono_buf) / sizeof(int16_t)) {
-            // 超过临时缓冲，直接跳过（正常不会）
+        int16_t mic_buf[4096];  // 麦克风声道 20ms @16kHz = 320 samples
+        int16_t ref_buf[4096];  // 参考声道 20ms @16kHz = 320 samples
+        if (mono_samples > sizeof(mic_buf) / sizeof(int16_t)) {
             if (log_counter++ % 100 == 0)
                 ump_warn("audio: frame too large (%zu mono samples), skip\n", mono_samples);
             return;
         }
 
+        // 声道边界校验：mic/ref index 必须在有效范围内
+        int mic_ch = (channels > audio_mic_channel_) ? audio_mic_channel_ : 0;
+        int ref_ch = (channels > audio_ref_channel_) ? audio_ref_channel_ : (channels - 1);
+
         if (channels == 1) {
-            memcpy(mono_buf, data, mono_samples * sizeof(int16_t));
+            // 单声道兜底：整帧即 mic，参考为空（AEC 无效，等同透传）
+            memcpy(mic_buf, data, mono_samples * sizeof(int16_t));
+            if (audio_ref_buf_)
+                ringbuffer_reset(audio_ref_buf_);
         } else {
-            // 多声道平均
+            // 多声道：抽取指定 index 的 mic 与 ref 声道（同一份 data，天然对齐）
             for (size_t i = 0; i < mono_samples; ++i) {
-                int32_t sum = 0;
-                for (int c = 0; c < channels; ++c)
-                    sum += data[i * channels + c];
-                mono_buf[i] = (int16_t)(sum / channels);
+                mic_buf[i] = data[i * channels + mic_ch];
+                ref_buf[i] = data[i * channels + ref_ch];
             }
         }
 
-        // 存 downmix 后的 mono PCM 到 ringbuffer
+        // 存 mic 到主 ringbuffer
         unsigned int mono_bytes = mono_samples * sizeof(int16_t);
         unsigned int written = ringbuffer_put(audio_ring_buf_,
-                                              (const char*)mono_buf, mono_bytes);
+                                              (const char*)mic_buf, mono_bytes);
+        // 存 ref 到参考 ringbuffer（AEC 用）
+        if (channels > 1 && audio_ref_buf_) {
+            ringbuffer_put(audio_ref_buf_, (const char*)ref_buf, mono_bytes);
+        }
         if (log_counter++ % 100 == 0) {
-            ump_info("audio: Capture OK, rate=%d, ch=%d->mono, written=%u, ring=%u\n",
-                     sample_rate, channels, written, ringbuffer_len(audio_ring_buf_));
+            ump_info("audio: Capture OK, rate=%d, ch=%d, mic_written=%u\n",
+                     sample_rate, channels, written);
         }
     }
 
@@ -733,7 +800,7 @@ namespace ecovacs
         if (audio_quit_.load(std::memory_order_acquire))
             return false;
 
-        const uint32_t frame_bytes = AUDIO_INPUT_RATE * AUDIO_FRAME_MS * 2 * AUDIO_INPUT_CHANNELS / 1000;
+        const uint32_t frame_bytes = AUDIO_INPUT_RATE * AUDIO_FRAME_MS * 2 * AUDIO_PROC_CHANNELS / 1000;
 
         // 从 ring buffer 取一帧
         if (!audio_ring_buf_) {
@@ -746,23 +813,33 @@ namespace ecovacs
         }
 
         unsigned int ring_len = ringbuffer_len(audio_ring_buf_);
-        if (ring_len < frame_bytes) {
+        unsigned int ref_ring_len = audio_ref_buf_ ? ringbuffer_len(audio_ref_buf_) : 0;
+        // AEC 开启时，mic 与 ref 必须同时足帧（保持严格对齐）；不足则等下一拍
+        if (ring_len < frame_bytes || (aec_enabled_ && ref_ring_len < frame_bytes)) {
             static uint32_t underrun_count = 0;
             // 每 500 次打一次（避免刷屏）
-            if (underrun_count++ % 500 == 0 && ring_len > 0) {
-                ump_warn("audio: need=%u, have=%u (underrun)\n", frame_bytes, ring_len);
+            if (underrun_count++ % 500 == 0 && (ring_len > 0 || ref_ring_len > 0)) {
+                ump_warn("audio: need=%u, mic_have=%u ref_have=%u (underrun)\n",
+                         frame_bytes, ring_len, ref_ring_len);
             }
             return true;
         }
 
-        // 直接在 ring buffer 上读（不拷贝）—— 但 ringbuffer_get 会拷贝到目标
-        // 先读出来
+        // 读 mic 帧
         std::vector<int16_t> pcm_in(frame_bytes / sizeof(int16_t));
         unsigned int got = ringbuffer_get(audio_ring_buf_,
                                           (char*)pcm_in.data(), frame_bytes);
         if (got < frame_bytes) {
-            // 不够一帧，放回去（简化：直接丢掉，等后续数据）
             return true;
+        }
+
+        // AEC 开启时读对应 ref 帧（vector 若不开 AEC 为空）
+        std::vector<int16_t> pcm_ref;
+        if (aec_enabled_ && audio_ref_buf_) {
+            pcm_ref.assign(frame_bytes / sizeof(int16_t), 0);
+            if (ringbuffer_get(audio_ref_buf_, (char*)pcm_ref.data(), frame_bytes) < frame_bytes) {
+                return true;  // ref 不足，丢弃该帧保持对齐（极端情况）
+            }
         }
 
         // ====== 音频推流性能统计（每秒打印一次） ======
@@ -776,24 +853,29 @@ namespace ecovacs
             a0.time_since_epoch()).count();
         // ============================================
 
-        // 0. 降噪处理（audio_processor 要求 10ms 帧 = sample_rate/100）
-        //    20ms 数据拆成两个 10ms 分别过 APM NS
-        //    AEC 已关闭，render_pcm 传 nullptr（ump 内部自动填零）
+        // 0. 降噪/AEC 处理（audio_processor 要求 10ms 帧 = sample_rate/100）
+        //    20ms 数据拆成两个 10ms 分别过 APM；AEC 开启时喂真实参考声道
         std::vector<int16_t> denoised(pcm_in.size());
         if (audio_processor_) {
             const int proc_frame = AUDIO_INPUT_RATE / 100;  // 160 samples @ 16kHz
+            // 参考信号：AEC 开启且有 ref 帧时用真实参考，否则传空（自动填零 = AEC 无回声）
+            const int16_t* ref0 = nullptr;
+            const int16_t* ref1 = nullptr;
+            if (aec_enabled_ && !pcm_ref.empty()) {
+                ref0 = pcm_ref.data();
+                ref1 = pcm_ref.data() + proc_frame;
+            }
+            // 延时由 AEC3 内部自动估算，无需外部指定
             // 前 10ms
             audio_processor_process(audio_processor_,
                                     pcm_in.data(),
-                                    nullptr,                        // render_pcm 自动填零
-                                    denoised.data(),
-                                    0);                             // delay_ms (AEC 关闭，暂传 0)
+                                    ref0,                             // 参考信号（AEC）
+                                    denoised.data());
             // 后 10ms
             audio_processor_process(audio_processor_,
                                     pcm_in.data() + proc_frame,
-                                    nullptr,
-                                    denoised.data() + proc_frame,
-                                    0);
+                                    ref1,
+                                    denoised.data() + proc_frame);
         } else {
             // audio_processor_ 未创建（level=0 关闭降噪 或 create 失败），直接透传
             denoised = pcm_in;
@@ -855,8 +937,8 @@ namespace ecovacs
                      fps, avg_ms, max_ms, s_audio_frame_count);
             s_audio_frame_count = 0;
             s_audio_total_us = 0;
-            s_audio_max_us = 0;
             s_audio_last_log_us = audio_start_us;
+            s_audio_max_us = 0;
         }
         // ============================
 

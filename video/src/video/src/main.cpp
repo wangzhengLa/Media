@@ -23,7 +23,6 @@ extern "C"
 #include "string_subscriber.h"
 #include "log.h"
 #include "osp.h"
-#include "inproc_comm.h"
 #include "api_video_ai_process.h"
 
 #ifdef ENABLE_ICEORYX
@@ -62,6 +61,11 @@ static const struct blobmsg_policy grap_policy[] = {
 static const struct blobmsg_policy set_bitrate_policy[] = {
     {.name = "bit_rate", .type = BLOBMSG_TYPE_INT32},
 };
+#if defined(ENABLE_MP4_RECORD)
+static const struct blobmsg_policy record_policy[] = {
+    {.name = "file_path", .type = BLOBMSG_TYPE_STRING},
+};
+#endif
 
 static int grap_pic_cb(struct ubus_context *ctx, struct ubus_object *obj,
                        struct ubus_request_data *req, const char *method,
@@ -329,6 +333,66 @@ static int stop_push_cb(struct ubus_context *ctx, struct ubus_object *obj,
     return 0;
 }
 
+#if defined(ENABLE_MP4_RECORD)
+static int start_record_cb(struct ubus_context *ctx, struct ubus_object *obj,
+                         struct ubus_request_data *req, const char *method,
+                         struct blob_attr *msg)
+{
+    std::lock_guard<std::mutex> guard(g_main_lock);
+    ump_info("start_record");
+
+    struct blob_buf b = {0};
+    struct blob_attr *tb[__GRAP_PARAM_MAX];
+    char *file_path = NULL;
+
+    blobmsg_parse(record_policy, ARRAY_SIZE(record_policy), tb, blob_data(msg), blob_len(msg));
+
+    if (tb[FILE_PATH])
+        file_path = blobmsg_get_string(tb[FILE_PATH]);
+
+    if (!file_path)
+    {
+        blob_buf_init(&b, 0);
+        blobmsg_add_string(&b, "ret", "failed");
+        blobmsg_add_string(&b, "error", "missing file_path");
+        ubus_send_reply(ctx, req, b.head);
+        return -1;
+    }
+
+    auto *engine = ecovacs::MediaEngine::MediaEngineInstance();
+    if (engine)
+    {
+        engine->StartRecord(file_path);
+    }
+
+    blob_buf_init(&b, 0);
+    blobmsg_add_string(&b, "ret", "ok");
+    blobmsg_add_string(&b, "file_path", file_path);
+    ubus_send_reply(ctx, req, b.head);
+    return 0;
+}
+
+static int stop_record_cb(struct ubus_context *ctx, struct ubus_object *obj,
+                        struct ubus_request_data *req, const char *method,
+                        struct blob_attr *msg)
+{
+    std::lock_guard<std::mutex> guard(g_main_lock);
+    ump_info("stop_record");
+
+    auto *engine = ecovacs::MediaEngine::MediaEngineInstance();
+    if (engine)
+    {
+        engine->StopRecord();
+    }
+
+    struct blob_buf b = {0};
+    blob_buf_init(&b, 0);
+    blobmsg_add_string(&b, "ret", "ok");
+    ubus_send_reply(ctx, req, b.head);
+    return 0;
+}
+#endif
+
 static int start_rtsp_push_cb(struct ubus_context *ctx, struct ubus_object *obj,
                          struct ubus_request_data *req, const char *method,
                          struct blob_attr *msg)
@@ -411,48 +475,6 @@ static int stop_webrtc_push_cb(struct ubus_context *ctx, struct ubus_object *obj
 }
 #endif
 
-#if defined(ENABLE_LIBPEER)
-static int start_libpeer_push_cb(struct ubus_context *ctx, struct ubus_object *obj,
-                                 struct ubus_request_data *req, const char *method,
-                                 struct blob_attr *msg)
-{
-    std::lock_guard<std::mutex> guard(g_main_lock);
-    ump_info("start_libpeer_push");
-
-    auto *engine = ecovacs::MediaEngine::MediaEngineInstance();
-    if (engine)
-    {
-        engine->StartLibpeerPush();
-    }
-
-    struct blob_buf b = {0};
-    blob_buf_init(&b, 0);
-    blobmsg_add_string(&b, "ret", "ok");
-    ubus_send_reply(ctx, req, b.head);
-    return 0;
-}
-
-static int stop_libpeer_push_cb(struct ubus_context *ctx, struct ubus_object *obj,
-                                struct ubus_request_data *req, const char *method,
-                                struct blob_attr *msg)
-{
-    std::lock_guard<std::mutex> guard(g_main_lock);
-    ump_info("stop_libpeer_push");
-
-    auto *engine = ecovacs::MediaEngine::MediaEngineInstance();
-    if (engine)
-    {
-        engine->StopLibpeerPush();
-    }
-
-    struct blob_buf b = {0};
-    blob_buf_init(&b, 0);
-    blobmsg_add_string(&b, "ret", "ok");
-    ubus_send_reply(ctx, req, b.head);
-    return 0;
-}
-#endif
-
 static int start_jpeg_pub_cb(struct ubus_context *ctx, struct ubus_object *obj,
                              struct ubus_request_data *req, const char *method,
                              struct blob_attr *msg)
@@ -503,12 +525,12 @@ static struct ubus_method control_methods[] = {
     {.name = "stop_ai", .handler = stop_ai_cb},
     {.name = "start_push", .handler = start_push_cb},
     {.name = "stop_push", .handler = stop_push_cb},
+#if defined(ENABLE_MP4_RECORD)
+    {.name = "start_record", .handler = start_record_cb},
+    {.name = "stop_record", .handler = stop_record_cb},
+#endif
     {.name = "start_rtsp_push", .handler = start_rtsp_push_cb},
     {.name = "stop_rtsp_push", .handler = stop_rtsp_push_cb},
-#if defined(ENABLE_LIBPEER)
-    {.name = "start_libpeer_push", .handler = start_libpeer_push_cb},
-    {.name = "stop_libpeer_push", .handler = stop_libpeer_push_cb},
-#endif
 #if defined(ENABLE_WEBRTC)
     {.name = "start_webrtc_push", .handler = start_webrtc_push_cb},
     {.name = "stop_webrtc_push", .handler = stop_webrtc_push_cb},
@@ -517,18 +539,21 @@ static struct ubus_method control_methods[] = {
     {.name = "stop_jpeg_pub", .handler = stop_jpeg_pub_cb},
 };
 
-static struct ubus_object_type control_type = {
-    .name = "video.control",
-    .methods = control_methods,
-    .n_methods = ARRAY_SIZE(control_methods),
-};
+static struct ubus_object_type control_type;
 
-static struct ubus_object control_obj = {
-    .name = "video.control",
-    .type = &control_type,
-    .methods = control_methods,
-    .n_methods = ARRAY_SIZE(control_methods),
-};
+static struct ubus_object control_obj;
+
+static void init_ubus_objects()
+{
+    control_type.name = "video.control";
+    control_type.methods = control_methods;
+    control_type.n_methods = ARRAY_SIZE(control_methods);
+
+    control_obj.name = "video.control";
+    control_obj.type = &control_type;
+    control_obj.methods = control_methods;
+    control_obj.n_methods = ARRAY_SIZE(control_methods);
+}
 
 static void ubus_reconn_timer_cb(struct uloop_timeout *timeout, struct ubus_context *ctx)
 {
@@ -558,6 +583,7 @@ static void ubus_conn_lost_cb(struct ubus_context *ctx)
 
 static void ubus_server_main(struct ubus_context *ctx)
 {
+    init_ubus_objects();
     int ret = ubus_add_object(ctx, &control_obj);
     if (ret)
         ump_error("add object failed: %s", ubus_strerror(ret));
@@ -723,17 +749,6 @@ int main(int argc, char **argv)
         ump_error("mediaEngine init failed");
         return -1;
     }
-
-    // ========== 订阅 NV12 视频帧 ==========
-    MessageBus::instance().subscribe_async<ecovacs::NV12FrameMessage>("video/nv12_frame",
-                                                                      [](const ecovacs::NV12FrameMessage &msg)
-                                                                      {
-                                                                          static uint64_t frame_count = 0;
-                                                                          if (++frame_count % 100 == 0)
-                                                                          {
-                                                                              ump_info("NV12 frame #%llu: %dx%d", frame_count, msg.width, msg.height);
-                                                                          }
-                                                                      });
 
     // ========== ubus 初始化 ==========
     uloop_init();

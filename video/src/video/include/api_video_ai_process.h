@@ -14,7 +14,6 @@
 #include "frame_publisher.h"
 #include "queue.h"
 #include "video_common_defines.h"
-#include "inproc_comm.h"
 
 #ifdef ENABLE_WEBSOCKETS
 #include <turbojpeg.h>
@@ -32,21 +31,6 @@
 
 namespace ecovacs
 {
-        struct NV12FrameMessage
-        {
-                uint32_t width;
-                uint32_t height;
-                uint32_t stride_y;
-                uint32_t stride_uv;
-                uint64_t timestamp;
-                std::vector<uint8_t> data;
-
-                const uint8_t *y_data() const { return data.data(); }
-                const uint8_t *uv_data() const { return data.data() + (width * height); }
-                uint32_t y_size() const { return width * height; }
-                uint32_t uv_size() const { return width * height / 2; }
-        };
-
         class VideoAI : public video_common::VideoSinkInterface
         {
         public:
@@ -80,8 +64,6 @@ namespace ecovacs
         private:
                 bool VideoAIProcess();
 
-                // 发布函数
-                void publishToMessageBus(video_common::VideoFrameBuffer *frame);
 #if defined(ENABLE_ROS2)
                 void publishToROS2(video_common::VideoFrameBuffer *frame);
 #endif

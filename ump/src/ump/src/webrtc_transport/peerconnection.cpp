@@ -7,13 +7,10 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <cstring>
 #include <memory>
 #include <mutex>
-#include <queue>
 #include <string>
 #include <thread>
-#include <unistd.h>
 #include <vector>
 
 #include "api/audio_codecs/builtin_audio_decoder_factory.h"
@@ -24,29 +21,6 @@ namespace wt {
 using webrtc::scoped_refptr;
 
 // ---- Helpers (file-local) ----
-static bool H264AccessUnitIsKey(const uint8_t* data, size_t size) {
-    size_t i = 0;
-    while (i + 2 < size) {
-        if (data[i] == 0 && data[i + 1] == 0) {
-            size_t start_len = 0;
-            if (data[i + 2] == 1) start_len = 3;
-            else if (i + 3 < size && data[i + 2] == 0 && data[i + 3] == 1) start_len = 4;
-            if (start_len) {
-                uint8_t nalu_type = data[i + start_len] & 0x1F;
-                if (nalu_type == 5 || nalu_type == 7) return true;
-                i += start_len + 1; continue;
-            }
-        }
-        ++i;
-    }
-    return false;
-}
-
-static uint64_t NowUs() {
-    return std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-}
-
 template<typename Rep, typename Period>
 static void SleepInterruptible(std::chrono::duration<Rep, Period> d,
                                const std::atomic<bool>& quit) {
@@ -72,6 +46,10 @@ void PushingObserver::OnIceGatheringChange(webrtc::PeerConnectionInterface::IceG
     }
 }
 
+void PushingObserver::OnIceConnectionChange(webrtc::PeerConnectionInterface::IceConnectionState s) {
+    ump_info("[webrtc] ICE connection state -> %d\n", static_cast<int>(s));
+}
+
 bool PushingObserver::WaitIceComplete(std::chrono::milliseconds timeout, const std::atomic<bool>& quit) {
     std::unique_lock<std::mutex> lk(ice_mu_);
     return ice_cv_.wait_for(lk, timeout, [&] { return ice_complete_ || quit.load(std::memory_order_acquire); });
@@ -80,8 +58,10 @@ bool PushingObserver::WaitIceComplete(std::chrono::milliseconds timeout, const s
 void PushingObserver::OnConnectionChange(webrtc::PeerConnectionInterface::PeerConnectionState s) {
     ump_info("[webrtc] peer connection state -> %d\n", static_cast<int>(s));
     using PCState = webrtc::PeerConnectionInterface::PeerConnectionState;
+    // kDisconnected is transient — ICE may recover on its own.
+    // Only kFailed / kClosed are terminal.
     bool connected = (s == PCState::kConnected);
-    bool down = (s == PCState::kFailed || s == PCState::kDisconnected || s == PCState::kClosed);
+    bool down = (s == PCState::kFailed || s == PCState::kClosed);
     if ((connected && !connected_) || (down && connected_)) {
         connected_ = connected;
         if (on_connection_edge) on_connection_edge(connected);
@@ -128,6 +108,11 @@ void WebrtcTransportImpl::SetAudioReceiver(IWebrtcAudioReceiver* r) {
     ump_info("[webrtc] SetAudioReceiver called (audio_recv not implemented yet, reserved)\n");
 }
 
+void WebrtcTransportImpl::SetVideoReceiver(IWebrtcVideoReceiver* r) {
+    video_receiver_ = r;
+    ump_info("[webrtc] SetVideoReceiver called (video_recv not implemented yet, reserved)\n");
+}
+
 bool WebrtcTransportImpl::Started() const { return started_.load(std::memory_order_acquire); }
 
 int32_t WebrtcTransportImpl::Start() {
@@ -136,14 +121,11 @@ int32_t WebrtcTransportImpl::Start() {
         ump_info("[webrtc] transport already running\n"); return 0;
     }
     quit_.store(false, std::memory_order_release);
-    ump_info("[webrtc] Start (master), fps=%d, max_viewers=%d, audio=%d, signaling=%s\n",
-             config_.video_fps, config_.max_viewers, config_.enable_audio ? 1 : 0,
-             config_.signaling_url.c_str());
+    ump_info("[webrtc] Start (master), max_viewers=%d, signaling=%s\n",
+             config_.max_viewers, config_.signaling_url.c_str());
     if (!CreateFactory()) { started_.store(false); return -1; }
     sig_quit_.store(false);
-    start_time_us_ = NowUs();
     mailbox_thread_ = std::thread([this] { RunSignaling(); });
-    send_thread_ = std::thread([this] { SendLoop(); });
     ump_info("[webrtc] Start done\n");
     return 0;
 }
@@ -152,47 +134,49 @@ int32_t WebrtcTransportImpl::Stop() {
     bool expected = true;
     if (!started_.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) return 0;
     quit_.store(true); sig_quit_.store(true);
-    if (send_thread_.joinable()) { send_thread_.join(); ump_info("[webrtc] send thread joined\n"); }
     if (mailbox_thread_.joinable()) { mailbox_thread_.join(); ump_info("[webrtc] signaling thread joined\n"); }
     DestroyFactory();
-    {
-        std::lock_guard<std::mutex> lk(q_mu_);
-        while (!frame_q_.empty()) { frame_q_.front()->RelRef(); frame_q_.pop(); }
-    }
     ump_info("[webrtc] Stop done\n");
     return 0;
 }
 
-void WebrtcTransportImpl::SendH264Frame(const uint8_t* data, size_t size, bool keyframe) {
+void WebrtcTransportImpl::SendVideoFrame(const uint8_t* data, size_t size, bool keyframe) {
     if (!started_.load(std::memory_order_acquire) || !data || size == 0) return;
-    auto holder = std::make_shared<FrameHolder>();
-    holder->data = new uint8_t[size];
-    holder->size = size;
-    holder->keyframe = keyframe;
-    std::memcpy(holder->data, data, size);
-    std::lock_guard<std::mutex> lk(q_mu_);
-    if (frame_q_.size() >= 60) {
-        if (!frame_q_.empty()) { frame_q_.front()->RelRef(); frame_q_.pop(); }
-        ump_error("[webrtc] video queue full, drop frame\n");
-    }
-    frame_q_.push(holder);
-}
-
-void WebrtcTransportImpl::SendG711Frame(const uint8_t* data, size_t size) {
-    if (!started_.load(std::memory_order_acquire) || !config_.enable_audio) return;
-    if (!data || size == 0) return;
     std::vector<std::shared_ptr<PeerContext>> snapshot;
     { std::lock_guard<std::mutex> lk(peers_mu_); snapshot = peers_; }
     int fed = 0;
     for (auto& peer : snapshot) {
         if (!peer->pc || !peer->connected.load(std::memory_order_acquire)) continue;
-        ExternalG711Encoder* enc = peer->audio_registry ? peer->audio_registry->active : nullptr;
-        if (enc) { enc->FeedG711Frame(data, size); ++fed; }
+        if (peer->need_keyframe) {
+            if (!keyframe) continue;
+            peer->need_keyframe = false;
+            ump_info("[webrtc] viewer (peer_id=%s) keyframe found, start sending\n",
+                     peer->peer_id.c_str());
+        }
+        ExternalVideoEncoder* enc = peer->video_registry ? peer->video_registry->active : nullptr;
+        if (enc) { enc->InjectVideoFrame(data, size, keyframe); ++fed; }
     }
-    static uint32_t g711_cnt = 0;
-    if (++g711_cnt % 50 == 0) {
-        ump_info("[webrtc] g711 #%u size=%zu fed_peers=%d total_peers=%zu\n",
-                 g711_cnt, size, fed, snapshot.size());
+    static uint32_t vid_cnt = 0;
+    if (++vid_cnt % 50 == 0) {
+        ump_info("[webrtc] video #%u size=%zu key=%d fed_peers=%d total_peers=%zu\n",
+                 vid_cnt, size, keyframe ? 1 : 0, fed, snapshot.size());
+    }
+}
+
+void WebrtcTransportImpl::SendAudioFrame(const uint8_t* data, size_t size) {
+    if (!started_.load(std::memory_order_acquire) || !data || size == 0) return;
+    std::vector<std::shared_ptr<PeerContext>> snapshot;
+    { std::lock_guard<std::mutex> lk(peers_mu_); snapshot = peers_; }
+    int fed = 0;
+    for (auto& peer : snapshot) {
+        if (!peer->pc || !peer->connected.load(std::memory_order_acquire)) continue;
+        ExternalAudioEncoder* enc = peer->audio_registry ? peer->audio_registry->active : nullptr;
+        if (enc) { enc->FeedAudioFrame(data, size); ++fed; }
+    }
+    static uint32_t aud_cnt = 0;
+    if (++aud_cnt % 50 == 0) {
+        ump_info("[webrtc] audio #%u size=%zu fed_peers=%d total_peers=%zu\n",
+                 aud_cnt, size, fed, snapshot.size());
     }
 }
 
@@ -208,11 +192,27 @@ bool WebrtcTransportImpl::CreateFactory() {
 }
 
 void WebrtcTransportImpl::DestroyFactory() {
+    // Snapshot peers and call pc->Close() WITHOUT holding peers_mu_.
+    // Close() runs synchronously on the signaling thread and fires
+    // OnConnectionChange(kClosed), whose callback (on_connection_edge) also
+    // takes peers_mu_. Holding the lock here would deadlock: Stop thread
+    // waits in Close() for the signaling thread, while the signaling thread
+    // waits for peers_mu_ held by the Stop thread.
+    std::vector<std::shared_ptr<PeerContext>> snapshot;
+    {
+        std::lock_guard<std::mutex> lk(peers_mu_);
+        snapshot = peers_;
+    }
+    for (auto& p : snapshot) {
+        if (p->pc) p->pc->Close();
+    }
+
+    // Close callbacks (if any) have already run. Now drop all references
+    // under the lock. It is harmless if a callback already nulled p->pc.
     {
         std::lock_guard<std::mutex> lk(peers_mu_);
         for (auto& p : peers_) {
-            if (p->pc) p->pc->Close();
-            p->track = nullptr;
+            p->video_track = nullptr;
             p->audio_track = nullptr;
             p->pc = nullptr;
             p->owned_factory = nullptr;
@@ -228,13 +228,10 @@ void WebrtcTransportImpl::DestroyFactory() {
 std::shared_ptr<WebrtcTransportImpl::PeerContext> WebrtcTransportImpl::CreatePeer(const std::string& peer_id) {
     auto peer = std::make_shared<PeerContext>();
     peer->peer_id = peer_id;
-    peer->registry = std::make_shared<ExternalH264Encoder::Registry>();
-    peer->registry->video_encoder = video_encoder_;
-    peer->registry->aggregator = aggregator_;
-
-    if (config_.enable_audio) {
-        peer->audio_registry = std::make_shared<ExternalG711Encoder::Registry>();
-    }
+    peer->video_registry = std::make_shared<ExternalVideoEncoder::Registry>();
+    peer->video_registry->video_encoder = video_encoder_;
+    peer->video_registry->aggregator = aggregator_;
+    peer->audio_registry = std::make_shared<ExternalAudioEncoder::Registry>();
 
     peer->observer = std::make_unique<PushingObserver>();
     std::weak_ptr<PeerContext> weak = peer;
@@ -244,13 +241,16 @@ std::shared_ptr<WebrtcTransportImpl::PeerContext> WebrtcTransportImpl::CreatePee
         p->connected.store(c, std::memory_order_release);
         if (c) {
             p->need_keyframe = true;
-            ump_info("[webrtc] viewer #%d connected\n", p->id);
-            if (viewer_listener_) viewer_listener_->OnViewerConnected(p->id);
+            ump_info("[webrtc] viewer (peer_id=%s) connected\n", p->peer_id.c_str());
+            if (viewer_listener_) viewer_listener_->OnViewerConnected(p->peer_id);
         } else {
-            ump_info("[webrtc] viewer #%d disconnected\n", p->id);
-            if (viewer_listener_) viewer_listener_->OnViewerDisconnected(p->id);
-            std::lock_guard<std::mutex> lk(peers_mu_);
-            p->pc = nullptr;
+            ump_info("[webrtc] viewer (peer_id=%s) disconnected\n", p->peer_id.c_str());
+            if (viewer_listener_) viewer_listener_->OnViewerDisconnected(p->peer_id);
+            // Do NOT release p->pc here. This callback runs inside the
+            // PeerConnection's own state-change / Close() call stack; dropping
+            // the last reference here would destroy the PC mid-call and cause
+            // a use-after-free. Actual teardown is done by RunSignaling's
+            // periodic cleanup (for ICE failures) or DestroyFactory (stop).
         }
     };
 
@@ -265,25 +265,16 @@ std::shared_ptr<WebrtcTransportImpl::PeerContext> WebrtcTransportImpl::CreatePee
         rtc.servers.push_back(s);
     }
 
-    auto enc_factory = std::make_unique<ExternalH264EncoderFactory>(peer->registry);
-    scoped_refptr<webrtc::AudioEncoderFactory> audio_enc_factory;
-    if (config_.enable_audio) {
-        audio_enc_factory = scoped_refptr<webrtc::AudioEncoderFactory>(
-            new ExternalG711EncoderFactory(peer->audio_registry));
-    } else {
-        audio_enc_factory = scoped_refptr<webrtc::AudioEncoderFactory>(new EmptyAudioEncoderFactory());
-    }
+    auto enc_factory = std::make_unique<ExternalVideoEncoderFactory>(peer->video_registry);
+    scoped_refptr<webrtc::AudioEncoderFactory> audio_enc_factory =
+        scoped_refptr<webrtc::AudioEncoderFactory>(
+            new ExternalAudioEncoderFactory(peer->audio_registry));
     scoped_refptr<webrtc::AudioDeviceModule> adm(
         new FakeAudioDeviceModule());
-    scoped_refptr<webrtc::AudioDecoderFactory> audio_dec_factory;
-    if (config_.enable_audio) {
-        // Even though we only send audio (sendonly), libwebrtc validates
-        // the recv codec list against the offer during SetLocalDescription.
-        // An empty decoder factory fails that check, so use the builtin one.
-        audio_dec_factory = webrtc::CreateBuiltinAudioDecoderFactory();
-    } else {
-        audio_dec_factory = scoped_refptr<webrtc::AudioDecoderFactory>(new EmptyAudioDecoderFactory());
-    }
+    // libwebrtc validates the recv codec list against the offer during
+    // SetLocalDescription, so use the builtin decoder factory.
+    scoped_refptr<webrtc::AudioDecoderFactory> audio_dec_factory =
+        webrtc::CreateBuiltinAudioDecoderFactory();
     peer->owned_factory = webrtc::CreatePeerConnectionFactory(
         network_thread_.get(), signaling_thread_.get(),
         adm,
@@ -293,38 +284,30 @@ std::shared_ptr<WebrtcTransportImpl::PeerContext> WebrtcTransportImpl::CreatePee
         nullptr, nullptr, nullptr);
     if (!peer->owned_factory) { ump_error("[webrtc] per-peer factory failed\n"); return nullptr; }
 
-    peer->track = peer->owned_factory->CreateVideoTrack(track_source_, "video0");
-    if (!peer->track) { ump_error("[webrtc] CreateVideoTrack failed\n"); return nullptr; }
+    peer->video_track = peer->owned_factory->CreateVideoTrack(track_source_, "video0");
+    if (!peer->video_track) { ump_error("[webrtc] CreateVideoTrack failed\n"); return nullptr; }
 
-    if (config_.enable_audio) {
-        peer->audio_track = peer->owned_factory->CreateAudioTrack("audio0", nullptr);
-        if (!peer->audio_track) {
-            ump_error("[webrtc] CreateAudioTrack failed\n"); return nullptr;
-        }
-    }
+    peer->audio_track = peer->owned_factory->CreateAudioTrack("audio0", nullptr);
+    if (!peer->audio_track) { ump_error("[webrtc] CreateAudioTrack failed\n"); return nullptr; }
 
     bool pc_ok = signaling_thread_->BlockingCall([&] {
         auto r = peer->owned_factory->CreatePeerConnectionOrError(
             rtc, webrtc::PeerConnectionDependencies(peer->observer.get()));
         if (!r.ok()) return false;
         peer->pc = r.MoveValue();
-        auto add = peer->pc->AddTrack(peer->track, {"stream0"});
+        auto add = peer->pc->AddTrack(peer->video_track, {"stream0"});
         if (!add.ok()) return false;
-        if (config_.enable_audio && peer->audio_track) {
-            auto add_audio = peer->pc->AddTrack(peer->audio_track, {"stream0"});
-            if (!add_audio.ok()) {
-                ump_error("[webrtc] AddTrack(audio) failed: %s\n",
-                          add_audio.error().message());
-                return false;
-            }
+        auto add_audio = peer->pc->AddTrack(peer->audio_track, {"stream0"});
+        if (!add_audio.ok()) {
+            ump_error("[webrtc] AddTrack(audio) failed: %s\n",
+                      add_audio.error().message());
+            return false;
         }
         return true;
     });
     if (!pc_ok) { ump_error("[webrtc] CreatePeerConnection/AddTrack failed\n"); return nullptr; }
 
-    peer->id = next_viewer_id_.fetch_add(1, std::memory_order_acq_rel);
-    ump_info("[webrtc] viewer #%d peer created, peer_id=%s, audio=%d\n",
-             peer->id, peer_id.c_str(), config_.enable_audio ? 1 : 0);
+    ump_info("[webrtc] viewer peer created, peer_id=%s\n", peer_id.c_str());
     return peer;
 }
 
@@ -364,6 +347,25 @@ std::string WebrtcTransportImpl::HandleOffer(std::shared_ptr<PeerContext> peer, 
 }
 
 void WebrtcTransportImpl::RemoveDeadPeers() {
+    // Close peers whose connection went down (ICE failure, etc.). The observer
+    // callback only marks connected=false; we must not destroy the PC from
+    // inside that callback. Collect the PCs under the lock, release them into
+    // local refs, then Close() outside the lock so the call stack never holds
+    // peers_mu_ while invoking PC callbacks.
+    std::vector<scoped_refptr<webrtc::PeerConnectionInterface>> to_close;
+    {
+        std::lock_guard<std::mutex> lk(peers_mu_);
+        for (auto& p : peers_) {
+            if (p->pc && !p->connected.load(std::memory_order_acquire)) {
+                to_close.push_back(p->pc);
+                p->pc = nullptr;
+            }
+        }
+    }
+    for (auto& pc : to_close) {
+        if (pc) pc->Close();
+    }
+
     std::lock_guard<std::mutex> lk(peers_mu_);
     peers_.erase(
         std::remove_if(peers_.begin(), peers_.end(),
@@ -429,8 +431,13 @@ void WebrtcTransportImpl::RunSignaling() {
                 std::string answer_sdp = HandleOffer(peer, offer_sdp);
                 if (answer_sdp.empty()) {
                     ump_error("[webrtc] handle offer failed\n");
-                    std::lock_guard<std::mutex> lk(peers_mu_);
-                    if (peer->pc) { peer->pc->Close(); peer->pc = nullptr; }
+                    scoped_refptr<webrtc::PeerConnectionInterface> to_close;
+                    {
+                        std::lock_guard<std::mutex> lk(peers_mu_);
+                        to_close = peer->pc;
+                        peer->pc = nullptr;
+                    }
+                    if (to_close) to_close->Close();
                     continue;
                 }
 
@@ -443,8 +450,8 @@ void WebrtcTransportImpl::RunSignaling() {
                 if (!ws.SendText(answer_frame)) {
                     ump_error("[webrtc] send answer failed\n");
                 } else {
-                    ump_info("[webrtc] answer sent to viewer #%d, sdp_len=%zu\n",
-                             peer->id, answer_sdp.size());
+                    ump_info("[webrtc] answer sent to viewer (peer_id=%s), sdp_len=%zu\n",
+                             peer->peer_id.c_str(), answer_sdp.size());
                 }
             } else if (type == "bye") {
                 std::string bye_peer;
@@ -454,8 +461,8 @@ void WebrtcTransportImpl::RunSignaling() {
                     std::lock_guard<std::mutex> lk(peers_mu_);
                     for (auto& p : peers_) {
                         if (p->peer_id == bye_peer && p->pc) {
-                            ump_info("[webrtc] viewer #%d (peer_id=%s) left, closing\n",
-                                     p->id, bye_peer.c_str());
+                            ump_info("[webrtc] viewer (peer_id=%s) left, closing\n",
+                                     bye_peer.c_str());
                             p->connected.store(false, std::memory_order_release);
                             to_close = p->pc;
                             p->pc = nullptr;
@@ -468,49 +475,6 @@ void WebrtcTransportImpl::RunSignaling() {
         RemoveDeadPeers();
         SleepInterruptible(std::chrono::seconds(1), sig_quit_);
     }
-}
-
-void WebrtcTransportImpl::SendLoop() {
-    const int interval_us = 1000000 / config_.video_fps;
-    uint64_t next_frame_us = 0;
-    int sent_cnt = 0;
-    while (!quit_.load(std::memory_order_acquire)) {
-        uint64_t now_us = NowUs();
-        if (next_frame_us == 0) next_frame_us = now_us;
-        if (now_us >= next_frame_us) {
-            next_frame_us += interval_us;
-            if (now_us > next_frame_us + 200000) next_frame_us = now_us + interval_us;
-
-            std::shared_ptr<FrameHolder> holder;
-            { std::lock_guard<std::mutex> lk(q_mu_); if (!frame_q_.empty()) { holder = frame_q_.front(); frame_q_.pop(); } }
-            if (holder) {
-                bool is_key = H264AccessUnitIsKey(holder->data, holder->size);
-                uint32_t ts = static_cast<uint32_t>((NowUs() - start_time_us_) * 90 / 1000);
-
-                std::vector<std::shared_ptr<PeerContext>> snapshot;
-                { std::lock_guard<std::mutex> lk(peers_mu_); snapshot = peers_; }
-
-                for (auto& peer : snapshot) {
-                    if (!peer->pc || !peer->connected.load(std::memory_order_acquire)) continue;
-                    ExternalH264Encoder* enc = peer->registry ? peer->registry->active : nullptr;
-                    if (!enc) continue;
-                    if (peer->need_keyframe) {
-                        if (!is_key) continue;
-                        peer->need_keyframe = false;
-                        ump_info("[webrtc] viewer #%d keyframe found, start sending\n", peer->id);
-                    }
-                    enc->InjectH264Frame(holder->data, holder->size, is_key, ts);
-                }
-                if (++sent_cnt % 50 == 0) {
-                    int n = 0;
-                    for (auto& p : snapshot) if (p->connected.load(std::memory_order_acquire)) ++n;
-                    ump_info("[webrtc] sent #%d size=%zu viewers=%d\n", sent_cnt, holder->size, n);
-                }
-            }
-        }
-        usleep(1000);
-    }
-    ump_info("[webrtc] send thread exited\n");
 }
 
 } // namespace wt

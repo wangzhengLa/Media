@@ -27,7 +27,7 @@ struct ringbuffer;
 // the hardware encoder and feeds H264 access units.
 //
 // Audio (device -> browser): ALSA capture @16kHz -> resample to 8kHz ->
-// G.711 A-law encode -> transport_->SendG711Frame().  Browser -> device
+// G.711 A-law encode -> transport_->SendAudioFrame().  Browser -> device
 // audio is not implemented yet.
 namespace ecovacs
 {
@@ -37,12 +37,9 @@ namespace ecovacs
         std::string turn_url;
         std::string turn_username;
         std::string turn_password;
-        int video_fps = 15;
         // Maximum simultaneous viewers (phone / browser). Each viewer costs
         // one PeerConnection + H264 encoder instance.
         int max_viewers = 4;
-        // Enable audio send (device -> browser).
-        bool enable_audio = true;
     };
 
     class VideoWebrtcPush : public video_common::EncodedImageSinkInterface,
@@ -79,8 +76,8 @@ namespace ecovacs
         void OnRatesChanged(uint32_t bitrate_bps, uint32_t framerate_fps) override;
 
         // IWebrtcViewerListener: log viewer connect / disconnect.
-        void OnViewerConnected(int viewer_id) override;
-        void OnViewerDisconnected(int viewer_id) override;
+        void OnViewerConnected(const std::string& peer_id) override;
+        void OnViewerDisconnected(const std::string& peer_id) override;
 
     private:
         struct TH264Buffer {

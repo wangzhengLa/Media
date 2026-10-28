@@ -349,6 +349,9 @@ namespace ecovacs
             unsigned int i;
             char fourcc_text[5];
             int ret;
+            const int MAX_REQBUFS_RETRY = 5;
+            const int RETRY_INTERVAL_US = 20000;  // 20ms 间隔
+            unsigned int alloc_count = 0;
 
             // 根据 stream_type 选择 FR 或 DS 设备
             int &capture_fd = (stream_type_ == "ds") ? ds_fd_ : fr_fd_;
@@ -436,9 +439,6 @@ namespace ecovacs
                      bytesperline_, sizeimage_);
 
             // REQBUFS — 加重试应对 close 后 CMA 异步释放延迟
-            const int MAX_REQBUFS_RETRY = 5;
-            const int RETRY_INTERVAL_US = 20000;  // 20ms 间隔
-            unsigned int alloc_count = 0;
             for (int retry = 0; retry < MAX_REQBUFS_RETRY; retry++) {
                 struct v4l2_requestbuffers clear_req;
                 memset(&clear_req, 0, sizeof(clear_req));

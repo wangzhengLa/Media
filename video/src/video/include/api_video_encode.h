@@ -34,6 +34,7 @@ namespace ecovacs
         int32_t RequestKeyFrame();
         int32_t SetRates(video_common::RateControlParameters &parameters);
         void OnFrame(video_common::VideoFrameBuffer *frame_buffer) override;
+        void SetSkipFrames(int count) { skip_frames_.store(count, std::memory_order_release); }
 
     private:
         bool EncodeProcess();
@@ -52,6 +53,7 @@ namespace ecovacs
         std::thread encodeThread_;
         std::atomic<bool> quit_{false};
         std::atomic<bool> encodeStarted_{false};
+        std::atomic<int> skip_frames_{0};
     };
 
 } // namespace ecovacs

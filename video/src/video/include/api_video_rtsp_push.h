@@ -33,7 +33,8 @@
 #define AUDIO_RING_BUFFER_SIZE (65536)  // 64KB，必须是 2 的幂（ringbuffer 要求）
 #define AUDIO_INPUT_RATE       (16000)   // ALSA 采集采样率
 #define AUDIO_OUTPUT_RATE      (8000)    // G711 输出采样率
-#define AUDIO_INPUT_CHANNELS   (1)       // 采集单声道
+#define AUDIO_PROC_CHANNELS    (1)       // 处理/输出单声道（采集多声道后下混为单声道）
+#define AUDIO_INPUT_CHANNELS   AUDIO_PROC_CHANNELS   // 兼容别名（live555 变体沿用）
 #define AUDIO_OUTPUT_CHANNELS  (1)       // 输出单声道
 #define AUDIO_FRAME_MS         (20)      // 每帧 20ms（G711 常用）
 
@@ -80,6 +81,14 @@ namespace ecovacs
         void SetAudioNoiseLevel(int32_t level) { audio_noise_level_ = level; }
         int32_t GetAudioNoiseLevel() const { return audio_noise_level_; }
 
+        // AEC / 采集配置
+        void SetAecEnabled(bool en) { aec_enabled_ = en; }
+        bool GetAecEnabled() const { return aec_enabled_; }
+        void SetAudioDevice(const std::string& dev) { audio_device_ = dev; }
+        void SetAudioCaptureChannels(int32_t ch) { audio_capture_channels_ = ch; }
+        void SetAudioMicChannel(int32_t ch) { audio_mic_channel_ = ch; }
+        void SetAudioRefChannel(int32_t ch) { audio_ref_channel_ = ch; }
+
         // 编码帧回调（来自编码器）
         void OnFrame(
             video_common::EncodedImageBuffer *encoded_image,
@@ -119,10 +128,18 @@ namespace ecovacs
         AudioProcessor* audio_processor_ = nullptr;   // WebRTC APM 降噪/AEC
         int32_t audio_noise_level_ = 0;                 // 降噪等级：0=关闭，1=低，2=中，3=高
         struct ringbuffer* audio_ring_buf_ = nullptr;
+        struct ringbuffer* audio_ref_buf_ = nullptr;    // AEC 参考声道 ringbuffer（与 mic 严格对齐）
         std::thread audio_thread_;
         std::atomic<bool> audio_running_{false};
         std::atomic<bool> audio_quit_{false};
         std::mutex audio_mutex_;
+
+        // AEC / 采集配置（启动前由配置源设置）
+        bool aec_enabled_ = false;                       // 总开关
+        std::string audio_device_ = "default";           // ALSA 采集设备
+        int32_t audio_capture_channels_ = 8;             // 采集声道数
+        int32_t audio_mic_channel_ = 0;                  // 麦克风声道 index
+        int32_t audio_ref_channel_ = 5;                  // 参考声道 index
 
 #if defined(ENABLE_ROS2)
         std::shared_ptr<ImagePublisher> image_pub_node_;

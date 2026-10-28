@@ -252,7 +252,100 @@ namespace ecovacs
             // In Windows, the image starts bottom left, instead of top left.
             // Setting a negative source height, inverts the image (within LibYuv).
             int64_t start_time = IntelliUtilTimeMillis();
-            if (libyuv::FOURCC_NV12 != ConvertVideoType(frameInfo.videoType))
+            if (frameInfo.videoType == video_common::VideoType::kYUY2)
+            {
+                // YUYV 直通：packed 格式直接拷贝，不做转换
+                // 优化：预分配 buffer，避免每帧 malloc/free 1.84MB
+                static video_common::VideoFrameBuffer *yuyv_buffer = nullptr;
+                if (!yuyv_buffer || yuyv_buffer->width() != target_width ||
+                    yuyv_buffer->height() != target_height)
+                {
+                    if (yuyv_buffer)
+                        yuyv_buffer->RelRef();
+                    yuyv_buffer = new video_common::VideoFrameBuffer(
+                        video_common::FrameType::kYUY2, target_width, target_height);
+                    yuyv_buffer->AddRef();  // 静态持有一个引用
+                }
+
+                video_common::VideoFrameBuffer *buffer;
+                if (yuyv_buffer->HasOneRef())
+                {
+                    // 编码线程已处理完，可以复用预分配 buffer
+                    buffer = yuyv_buffer;
+                    buffer->AddRef();
+                }
+                else
+                {
+                    // 编码线程还在用，新建临时 buffer
+                    buffer = new video_common::VideoFrameBuffer(
+                        video_common::FrameType::kYUY2, target_width, target_height);
+                    buffer->AddRef();
+                }
+
+                int src_stride = width * 2;
+                int dst_stride = buffer->StrideY();
+                if (src_stride == dst_stride)
+                {
+                    memcpy(buffer->MutableDataY(), videoFrame, dst_stride * target_height);
+                }
+                else
+                {
+                    for (int row = 0; row < target_height; row++)
+                        memcpy(buffer->MutableDataY() + row * dst_stride,
+                               videoFrame + row * src_stride,
+                               target_width * 2);
+                }
+                buffer->SetTimestamp(captureTime);
+                buffer->SetSequence(sequence);
+                DeliverCapturedFrame(buffer);
+                buffer->RelRef();
+            }
+            else if (frameInfo.videoType == video_common::VideoType::kRGB24)
+            {
+                // RGB24 直通：packed 格式直接拷贝，不做转换（AI 通路用）
+                static video_common::VideoFrameBuffer *rgb_buffer = nullptr;
+                if (!rgb_buffer || rgb_buffer->width() != target_width ||
+                    rgb_buffer->height() != target_height)
+                {
+                    if (rgb_buffer)
+                        rgb_buffer->RelRef();
+                    rgb_buffer = new video_common::VideoFrameBuffer(
+                        video_common::FrameType::kRGB24, target_width, target_height);
+                    rgb_buffer->AddRef();
+                }
+
+                video_common::VideoFrameBuffer *buffer;
+                if (rgb_buffer->HasOneRef())
+                {
+                    buffer = rgb_buffer;
+                    buffer->AddRef();
+                }
+                else
+                {
+                    buffer = new video_common::VideoFrameBuffer(
+                        video_common::FrameType::kRGB24, target_width, target_height);
+                    buffer->AddRef();
+                }
+
+                int src_stride = width * 3;
+                int dst_stride = buffer->StrideY();
+                if (src_stride == dst_stride)
+                {
+                    memcpy(buffer->MutableDataY(), videoFrame, dst_stride * target_height);
+                }
+                else
+                {
+                    for (int row = 0; row < target_height; row++)
+                        memcpy(buffer->MutableDataY() + row * dst_stride,
+                               videoFrame + row * src_stride,
+                               target_width * 3);
+                }
+                buffer->SetTimestamp(captureTime);
+                buffer->SetSequence(sequence);
+                DeliverCapturedFrame(buffer);
+                buffer->RelRef();
+            }
+            else if (libyuv::FOURCC_NV12 != ConvertVideoType(frameInfo.videoType))
             {
                 video_common::VideoFrameBuffer *buffer = new video_common::VideoFrameBuffer(target_width, target_height, stride_y, stride_u, stride_v);
                 buffer->AddRef();

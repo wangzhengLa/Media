@@ -21,6 +21,11 @@ namespace ecovacs
         broadcaster_.RemoveSink(std::move(sink));
     }
 
+    bool VideoEncodeBroadcaster::frame_wanted() const
+    {
+        return broadcaster_.frame_wanted();
+    }
+
     void VideoEncodeBroadcaster::OnFrame(video_common::EncodedImageBuffer *encoded_image, const video_common::CodecSpecificInfo *codec_specific_info)
     {
         broadcaster_.OnFrame(encoded_image, codec_specific_info);

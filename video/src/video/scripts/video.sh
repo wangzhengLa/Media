@@ -5,11 +5,12 @@
 
 load () {
 	export MALLOC_ARENA_MAX=1
-    video -f /etc/conf/video.json &
+  video -f /etc/conf/video.json &
 }
 
 unload () {
-  killall -9 video
+  killall -9 video   # 还没退：SIGKILL 强杀
+
 }
 
 case "$1" in

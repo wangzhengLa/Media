@@ -29,7 +29,7 @@ if(NOT foonathan_memory_FOUND)
 endif()
 
 if(NOT fastrtps_FOUND)
-    find_package(fastrtps 2.12 REQUIRED)
+    find_package(fastrtps REQUIRED)
 endif()
 
 # Check C++11 (optional, usually inherited from top-level)

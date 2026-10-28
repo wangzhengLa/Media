@@ -80,6 +80,8 @@ namespace ecovacs
             kNV12,
             kNV21,
             kI444,
+            kYUY2,
+            kRGB24,
             kBUTT,
         };
 
@@ -135,11 +137,11 @@ namespace ecovacs
             bool HasOneRef() const { return ref_count_.HasOneRef(); }
             int GetRefCount() { return ref_count_.GetRefCount(); }
 
-            ImageSourceType GetImageSourceType() { return image_source_type_; }
+            ImageSourceType GetImageSourceType() const { return image_source_type_; }
             void SetImageSourceType(ImageSourceType type) { image_source_type_ = type; }
-            uint64_t GetTimestamp() { return timestamp_; }
+            uint64_t GetTimestamp() const { return timestamp_; }
             void SetTimestamp(uint64_t timestamp) { timestamp_ = timestamp; }
-            uint32_t GetSequence() { return sequence_; }
+            uint32_t GetSequence() const { return sequence_; }
             void SetSequence(uint32_t sequence) { sequence_ = sequence; }
 
         private:

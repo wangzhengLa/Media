@@ -23,7 +23,7 @@ void BitrateAggregator::SetVideoEncoder(IWebrtcVideoEncoder* e) {
     video_encoder_ = e;
 }
 
-void BitrateAggregator::Update(ExternalH264Encoder* enc, uint32_t bitrate_bps, uint32_t fps) {
+void BitrateAggregator::Update(ExternalVideoEncoder* enc, uint32_t bitrate_bps, uint32_t fps) {
     uint32_t min_br = 0;
     uint32_t min_fps = 0;
     IWebrtcVideoEncoder* ve = nullptr;
@@ -47,7 +47,7 @@ void BitrateAggregator::Update(ExternalH264Encoder* enc, uint32_t bitrate_bps, u
     if (ve && min_br != 0) ve->OnRatesChanged((int32_t)min_br, (int32_t)min_fps);
 }
 
-void BitrateAggregator::Remove(ExternalH264Encoder* enc) {
+void BitrateAggregator::Remove(ExternalVideoEncoder* enc) {
     uint32_t min_br = 0;
     uint32_t min_fps = 0;
     IWebrtcVideoEncoder* ve = nullptr;
@@ -69,61 +69,68 @@ void BitrateAggregator::Remove(ExternalH264Encoder* enc) {
 }
 
 // =====================================================================
-//  ExternalH264Encoder
+//  ExternalVideoEncoder
 // =====================================================================
-ExternalH264Encoder::ExternalH264Encoder(std::shared_ptr<Registry> r) : registry_(r) {}
-ExternalH264Encoder::~ExternalH264Encoder() {
+ExternalVideoEncoder::ExternalVideoEncoder(std::shared_ptr<Registry> r) : registry_(r) {}
+ExternalVideoEncoder::~ExternalVideoEncoder() {
     if (registry_ && registry_->active == this) registry_->active = nullptr;
     if (registry_ && registry_->aggregator) registry_->aggregator->Remove(this);
 }
 
-int ExternalH264Encoder::InitEncode(const webrtc::VideoCodec* cs, const Settings&) {
+int ExternalVideoEncoder::InitEncode(const webrtc::VideoCodec* cs, const Settings&) {
     if (!cs) return WEBRTC_VIDEO_CODEC_ERR_PARAMETER;
     width_ = cs->width;
     height_ = cs->height;
     if (registry_) registry_->active = this;
-    ump_info("[webrtc] external H264 encoder InitEncode %ux%u\n", width_, height_);
+    ump_info("[webrtc] external video encoder InitEncode %ux%u\n", width_, height_);
     return WEBRTC_VIDEO_CODEC_OK;
 }
 
-int32_t ExternalH264Encoder::RegisterEncodeCompleteCallback(webrtc::EncodedImageCallback* cb) {
+int32_t ExternalVideoEncoder::RegisterEncodeCompleteCallback(webrtc::EncodedImageCallback* cb) {
     callback_ = cb;
-    ump_info("[webrtc] external H264 callback registered\n");
+    ump_info("[webrtc] external video callback registered\n");
     return WEBRTC_VIDEO_CODEC_OK;
 }
 
-int32_t ExternalH264Encoder::Release() {
+int32_t ExternalVideoEncoder::Release() {
     callback_ = nullptr;
     if (registry_ && registry_->active == this) registry_->active = nullptr;
     if (registry_ && registry_->aggregator) registry_->aggregator->Remove(this);
-    ump_info("[webrtc] external H264 release\n");
+    ump_info("[webrtc] external video release\n");
     return WEBRTC_VIDEO_CODEC_OK;
 }
 
-int32_t ExternalH264Encoder::Encode(const webrtc::VideoFrame&,
+int32_t ExternalVideoEncoder::Encode(const webrtc::VideoFrame&,
                                     const std::vector<webrtc::VideoFrameType>*) {
     return WEBRTC_VIDEO_CODEC_OK;
 }
 
-void ExternalH264Encoder::SetRates(const RateControlParameters& p) {
+void ExternalVideoEncoder::SetRates(const RateControlParameters& p) {
     last_br_ = p.bitrate.get_sum_bps();
     last_fps_ = p.framerate_fps;
-    //ump_debug("[webrtc] ext h264 setrates %u bps / %u fps\n", last_br_, last_fps_);
+    //ump_debug("[webrtc] ext video setrates %u bps / %u fps\n", last_br_, last_fps_);
     if (registry_ && registry_->aggregator) registry_->aggregator->Update(this, last_br_, last_fps_);
 }
 
-ExternalH264Encoder::EncoderInfo ExternalH264Encoder::GetEncoderInfo() const {
+ExternalVideoEncoder::EncoderInfo ExternalVideoEncoder::GetEncoderInfo() const {
     EncoderInfo info;
     info.supports_native_handle = false;
-    info.implementation_name = "ExternalH264";
+    info.implementation_name = "ExternalVideo";
     info.has_trusted_rate_controller = true;
     info.is_hardware_accelerated = true;
     info.supports_simulcast = false;
     return info;
 }
 
-void ExternalH264Encoder::InjectH264Frame(const uint8_t* d, size_t s, bool key, uint32_t ts) {
+void ExternalVideoEncoder::InjectVideoFrame(const uint8_t* d, size_t s, bool key) {
     if (!callback_) return;
+    if (first_frame_us_ == 0) {
+        first_frame_us_ = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    uint64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    uint32_t ts = static_cast<uint32_t>((now_us - first_frame_us_) * 90 / 1000);
     webrtc::EncodedImage img;
     img.SetEncodedData(webrtc::EncodedImageBuffer::Create(d, s));
     img._encodedWidth = width_ ? width_ : 1280;
@@ -141,12 +148,12 @@ void ExternalH264Encoder::InjectH264Frame(const uint8_t* d, size_t s, bool key, 
 }
 
 // =====================================================================
-//  ExternalH264EncoderFactory
+//  ExternalVideoEncoderFactory
 // =====================================================================
-ExternalH264EncoderFactory::ExternalH264EncoderFactory(
-    std::shared_ptr<ExternalH264Encoder::Registry> r) : registry_(r) {}
+ExternalVideoEncoderFactory::ExternalVideoEncoderFactory(
+    std::shared_ptr<ExternalVideoEncoder::Registry> r) : registry_(r) {}
 
-std::vector<webrtc::SdpVideoFormat> ExternalH264EncoderFactory::GetSupportedFormats() const {
+std::vector<webrtc::SdpVideoFormat> ExternalVideoEncoderFactory::GetSupportedFormats() const {
     webrtc::SdpVideoFormat fmt("H264");
     fmt.parameters["level-asymmetry-allowed"] = "1";
     fmt.parameters["packetization-mode"] = "1";
@@ -154,10 +161,10 @@ std::vector<webrtc::SdpVideoFormat> ExternalH264EncoderFactory::GetSupportedForm
     return {fmt};
 }
 
-std::unique_ptr<webrtc::VideoEncoder> ExternalH264EncoderFactory::Create(
+std::unique_ptr<webrtc::VideoEncoder> ExternalVideoEncoderFactory::Create(
     const webrtc::Environment&, const webrtc::SdpVideoFormat& f) {
-    ump_info("[webrtc] external H264 encoder Create %s\n", f.name.c_str());
-    return std::make_unique<ExternalH264Encoder>(registry_);
+    ump_info("[webrtc] external video encoder Create %s\n", f.name.c_str());
+    return std::make_unique<ExternalVideoEncoder>(registry_);
 }
 
 // =====================================================================

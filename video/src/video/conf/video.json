@@ -2,10 +2,11 @@
     "unix_sock_path": "/tmp/ubus.sock",
     "captrue_cfg": [
         {
-            "width": 640,
-            "height": 480,
-            "fps": 15,
+            "width": 1280,
+            "height": 720,
+            "fps": 25,
             "device_index": 0,
+            "csi_id": -1,
             "camera_type": "sc200ai",
             "stream_property": "living",
             "cam_id": 0,
@@ -14,8 +15,8 @@
         }
     ],
     "encoder_cfg": {
-        "width": 640,
-        "height": 480,
+        "width": 1280,
+        "height": 720,
         "init_qp": 30,
         "min_qp": 10,
         "max_qp": 50,
@@ -23,11 +24,16 @@
         "min_bps": 128000,
         "max_bps": 512000,
         "gop": 30,
-        "max_fps": 15,
+        "max_fps": 25,
         "crop_x": 0,
         "crop_y": 0
     },
     "pusher_cfg": {
-        "audio_noise_level": 2
+        "audio_noise_level": 2,
+        "audio_device": "default",
+        "audio_capture_channels": 8,
+        "audio_mic_channel": 0,
+        "audio_ref_channel": 5,
+        "aec_enabled": 1
     }
 }

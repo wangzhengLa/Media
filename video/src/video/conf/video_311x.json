@@ -2,8 +2,8 @@
     "unix_sock_path": "/tmp/ubus.sock",
     "captrue_cfg": [
         {
-            "width": 640,
-            "height": 480,
+            "width": 1280,
+            "height": 720,
             "fps": 30,
             "device_index": 0,
             "csi_id": 2,

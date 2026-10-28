@@ -113,9 +113,7 @@ namespace ecovacs
         tcfg.turn_url = config_.turn_url;
         tcfg.turn_username = config_.turn_username;
         tcfg.turn_password = config_.turn_password;
-        tcfg.video_fps = config_.video_fps;
         tcfg.max_viewers = config_.max_viewers;
-        tcfg.enable_audio = config_.enable_audio;
 
         transport_ = WebrtcTransport::Create();
         if (!transport_) {
@@ -134,10 +132,8 @@ namespace ecovacs
         }
 
         // Start audio capture + encode pipeline (device -> browser).
-        if (config_.enable_audio) {
-            if (AudioStart() != 0) {
-                ump_warn("[webrtc] audio start failed, running video-only\n");
-            }
+        if (AudioStart() != 0) {
+            ump_warn("[webrtc] audio start failed, running video-only\n");
         }
 
         // Drain thread: pull H264 frames from the queue and feed the transport.
@@ -147,7 +143,7 @@ namespace ecovacs
             while (!quit_.load(std::memory_order_acquire)) {
                 TH264Buffer* f = DequeueLatestFrame();
                 if (f && f->h264_frame) {
-                    transport_->SendH264Frame(
+                    transport_->SendVideoFrame(
                         f->h264_frame->data(), f->h264_frame->size(),
                         H264IsKeyframe(f->h264_frame->data(), f->h264_frame->size()));
                     f->h264_frame->RelRef();
@@ -234,8 +230,9 @@ namespace ecovacs
         video_encode_->SetRates(p);
     }
 
-    void VideoWebrtcPush::OnViewerConnected(int viewer_id) {
-        ump_info("[webrtc] viewer #%d connected, requesting keyframe\n", viewer_id);
+    void VideoWebrtcPush::OnViewerConnected(const std::string& peer_id) {
+        ump_info("[webrtc] viewer (peer_id=%s) connected, requesting keyframe\n",
+                 peer_id.c_str());
         // A new viewer needs a keyframe to start decoding. Force the hardware
         // encoder to emit an IDR as soon as possible.
         if (video_encode_) {
@@ -243,14 +240,14 @@ namespace ecovacs
         }
     }
 
-    void VideoWebrtcPush::OnViewerDisconnected(int viewer_id) {
-        ump_info("[webrtc] viewer #%d disconnected\n", viewer_id);
+    void VideoWebrtcPush::OnViewerDisconnected(const std::string& peer_id) {
+        ump_info("[webrtc] viewer (peer_id=%s) disconnected\n", peer_id.c_str());
     }
 
     // =====================================================================
     //  Audio pipeline (device -> browser)
     //  ALSA @16kHz mono -> ringbuffer -> resample 16k->8k -> G.711 A-law
-    //  -> transport_->SendG711Frame()
+    //  -> transport_->SendAudioFrame()
     // =====================================================================
     int32_t VideoWebrtcPush::AudioInit() {
         audio_ring_buf_ = ringbuffer_create(AUDIO_RING_BUFFER_SIZE);
@@ -398,7 +395,7 @@ namespace ecovacs
         const int16_t* proc_src = pcm_in.data();
         if (audio_processor_) {
             denoised.resize(pcm_in.size());
-            audio_processor_process(audio_processor_, pcm_in.data(), nullptr, denoised.data(), 0);
+            audio_processor_process(audio_processor_, pcm_in.data(), nullptr, denoised.data());
             proc_src = denoised.data();
         }
 
@@ -418,7 +415,7 @@ namespace ecovacs
         }
 
         // Fan-out to all connected viewers via the transport.
-        if (transport_) transport_->SendG711Frame(g711_data.data(), g711_data.size());
+        if (transport_) transport_->SendAudioFrame(g711_data.data(), g711_data.size());
 
         static uint32_t audio_frame_cnt = 0;
         if (++audio_frame_cnt % 50 == 0) {

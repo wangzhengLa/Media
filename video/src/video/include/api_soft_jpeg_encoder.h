@@ -41,6 +41,17 @@ namespace ecovacs
                                         int quality = 85);
 
         /**
+         * @brief 编码 RGB24 格式图像为 JPEG
+         * @param rgb_data RGB 数据（RGBRGB... 排列）
+         * @param stride 行步长（字节，0 表示使用 width*3）
+         * @param quality JPEG 质量 (1-100, 默认 85)
+         * @return JPEG 数据，空 vector 表示失败
+         */
+        std::vector<uint8_t> EncodeRGB(const uint8_t *rgb_data,
+                                       int stride = 0,
+                                       int quality = 85);
+
+        /**
          * @brief 检查编码器是否已初始化
          */
         bool IsInitialized() const { return compressor_ != nullptr; }

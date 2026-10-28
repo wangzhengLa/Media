@@ -35,28 +35,29 @@ namespace wt {
 class BitrateAggregator {
 public:
     void SetVideoEncoder(IWebrtcVideoEncoder* e);
-    void Update(class ExternalH264Encoder* enc, uint32_t bitrate_bps, uint32_t fps);
-    void Remove(class ExternalH264Encoder* enc);
+    void Update(class ExternalVideoEncoder* enc, uint32_t bitrate_bps, uint32_t fps);
+    void Remove(class ExternalVideoEncoder* enc);
 private:
     std::mutex mu_;
-    std::unordered_map<ExternalH264Encoder*, uint32_t> bitrates_;
+    std::unordered_map<ExternalVideoEncoder*, uint32_t> bitrates_;
     IWebrtcVideoEncoder* video_encoder_ = nullptr;
     uint32_t last_br_ = 0, last_fps_ = 0;
 };
 
 // =====================================================================
-//  External H264 encoder: injects pre-encoded H264 frames into
+//  External video encoder: injects pre-encoded video frames into
 //  libwebrtc's RTP packetizer (bypasses libwebrtc's own encoding).
+//  Current codec: H.264 Annex-B.
 // =====================================================================
-class ExternalH264Encoder : public webrtc::VideoEncoder {
+class ExternalVideoEncoder : public webrtc::VideoEncoder {
 public:
     struct Registry {
-        ExternalH264Encoder* active = nullptr;
+        ExternalVideoEncoder* active = nullptr;
         IWebrtcVideoEncoder* video_encoder = nullptr;
         std::shared_ptr<BitrateAggregator> aggregator;
     };
-    explicit ExternalH264Encoder(std::shared_ptr<Registry> r);
-    ~ExternalH264Encoder() override;
+    explicit ExternalVideoEncoder(std::shared_ptr<Registry> r);
+    ~ExternalVideoEncoder() override;
 
     int InitEncode(const webrtc::VideoCodec* cs, const Settings&) override;
     int32_t RegisterEncodeCompleteCallback(webrtc::EncodedImageCallback* cb) override;
@@ -65,22 +66,25 @@ public:
     void SetRates(const RateControlParameters& p) override;
     EncoderInfo GetEncoderInfo() const override;
 
-    // Called by the send loop to inject a pre-encoded H264 access unit.
-    void InjectH264Frame(const uint8_t* d, size_t s, bool key, uint32_t ts);
+    // Called by the transport to inject a pre-encoded video frame.
+    // RTP timestamp (90kHz) is computed internally from the elapsed time
+    // since the first injected frame.
+    void InjectVideoFrame(const uint8_t* d, size_t s, bool key);
 
 private:
     std::shared_ptr<Registry> registry_;
     webrtc::EncodedImageCallback* callback_ = nullptr;
     uint32_t width_ = 0, height_ = 0, last_br_ = 0, last_fps_ = 0;
+    uint64_t first_frame_us_ = 0;
 };
 
-class ExternalH264EncoderFactory : public webrtc::VideoEncoderFactory {
+class ExternalVideoEncoderFactory : public webrtc::VideoEncoderFactory {
 public:
-    explicit ExternalH264EncoderFactory(std::shared_ptr<ExternalH264Encoder::Registry> r);
+    explicit ExternalVideoEncoderFactory(std::shared_ptr<ExternalVideoEncoder::Registry> r);
     std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override;
     std::unique_ptr<webrtc::VideoEncoder> Create(const webrtc::Environment&, const webrtc::SdpVideoFormat& f) override;
 private:
-    std::shared_ptr<ExternalH264Encoder::Registry> registry_;
+    std::shared_ptr<ExternalVideoEncoder::Registry> registry_;
 };
 
 // ---- Dummy video source (keeps the video track alive) ----

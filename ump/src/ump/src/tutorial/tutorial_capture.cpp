@@ -13,7 +13,7 @@ class CaptureSink : public video_common::VideoSinkInterface
 public:
 	CaptureSink()
 	{
-		nv12_fp_ = fopen("/userdata/640*480.nv12", "wb+");
+		nv12_fp_ = fopen("/userdata/1280*720.yuyv", "wb+");
 	}
 	~CaptureSink()
 	{
@@ -25,7 +25,7 @@ public:
 	{
 		if (nv12_fp_)
 		{
-			ump_info("capture one freame\r\n");
+			ump_info("capture One Frame\r\n");
 		}
 	}
 
@@ -56,8 +56,8 @@ int main(int argc, char **argv)
 
 	ump_info("log init finish\n");
 
-	size_t width = 640;
-	size_t height = 480;
+	size_t width = 1280;
+	size_t height = 720;
 	size_t target_fps = 30;
 	size_t device_index = 0;
 
@@ -103,7 +103,7 @@ int main(int argc, char **argv)
 	requestCap.width = static_cast<int32_t>(width);
 	requestCap.height = static_cast<int32_t>(height);
 	requestCap.maxFPS = static_cast<int32_t>(target_fps);
-	requestCap.videoType = video_common::VideoType::kNV12;
+	requestCap.videoType = video_common::VideoType::kYUY2;
 
 	VideoCaptureCapability bestCap = requestCap;
 	int32_t num = device_info->GetBestMatchedCapability(unique_name, requestCap, bestCap);
@@ -130,6 +130,7 @@ int main(int argc, char **argv)
 	}
 
 	CaptureSink *capture_file_sink = new CaptureSink();
+	
 	for (int i = 0; i < 10; i++)
 	{
 		vcm_->RegisterCaptureDataCallback(capture_file_sink);
@@ -138,7 +139,6 @@ int main(int argc, char **argv)
 			ump_error("vcm_ start_capture failed\r\n");
 			return -1;
 		}
-
 		IntelliUtilSleepMs(1 * 1000);
 
 		ump_info("DeRegisterCaptureDataCallback start\r\n");
@@ -149,6 +149,7 @@ int main(int argc, char **argv)
 		vcm_->StopCapture();
 		ump_info("StopCapture end\r\n");
 	}
+
 
 	delete vcm_;
 	delete capture_file_sink;

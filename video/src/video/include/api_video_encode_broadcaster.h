@@ -20,6 +20,8 @@ namespace ecovacs
         void AddOrUpdateSink(std::shared_ptr<video_common::EncodedImageSinkInterface> sink) override;
         void RemoveSink(std::shared_ptr<video_common::EncodedImageSinkInterface> sink) override;
 
+        bool frame_wanted() const;
+
         void OnDiscardedFrame() override;
 
     private:

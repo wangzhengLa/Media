@@ -16,9 +16,6 @@
 #else
 #include "api_video_rtsp_push.h"
 #endif
-#if defined(ENABLE_LIBPEER)
-#include "api_video_libpeer_push.h"
-#endif
 #if defined(ENABLE_WEBRTC)
 #include "api_video_webrtc_push.h"
 #endif
@@ -26,6 +23,9 @@
 #include "api_video_ai_process.h"
 #include "api_raw_video_save.h"
 #include "api_jpeg_publish.h"
+#if defined(ENABLE_MP4_RECORD)
+#include "api_video_record.h"
+#endif
 #include "api_message_dispatcher.h"
 
 namespace ecovacs
@@ -147,23 +147,6 @@ namespace ecovacs
 #endif
     };
 
-#if defined(ENABLE_LIBPEER)
-    // 视频推流libpeer元件
-    class VideoLibpeerPushElement
-    {
-    public:
-        VideoLibpeerPushElement() = default;
-        static std::unique_ptr<VideoLibpeerPushElement> Create();
-        ~VideoLibpeerPushElement() = default;
-
-        VideoLibpeerPushElement(const VideoLibpeerPushElement &) = delete;
-        VideoLibpeerPushElement &operator=(const VideoLibpeerPushElement &) = delete;
-
-    public:
-        std::shared_ptr<VideoLibpeerPush> video_push_;
-    };
-#endif
-
 #if defined(ENABLE_WEBRTC)
     // 视频推流官方裁剪栈 webrtc 元件
     class VideoWebrtcPushElement
@@ -197,9 +180,21 @@ namespace ecovacs
     };
 
     // 视频MP4录像元件
+#if defined(ENABLE_MP4_RECORD)
     class VideoMp4RecordElement
     {
+    public:
+        VideoMp4RecordElement() = default;
+        static std::unique_ptr<VideoMp4RecordElement> Create();
+        ~VideoMp4RecordElement() = default;
+
+        VideoMp4RecordElement(const VideoMp4RecordElement &) = delete;
+        VideoMp4RecordElement &operator=(const VideoMp4RecordElement &) = delete;
+
+    public:
+        std::shared_ptr<VideoRecord> video_record_;
     };
+#endif
 
     // JPEG图片发布元件
     class JpegPicPublishElement
@@ -236,18 +231,16 @@ namespace ecovacs
         int32_t StopPush();
         int32_t StartRtspPush();
         int32_t StopRtspPush();
-#if defined(ENABLE_LIBPEER)
-        int32_t StartLibpeerPush();
-        int32_t StopLibpeerPush();
-#endif
 #if defined(ENABLE_WEBRTC)
         int32_t StartWebrtcPush();
         int32_t StopWebrtcPush();
 #endif
         int32_t StartAI();
         int32_t StopAI();
-        int32_t StartRecord();
+#if defined(ENABLE_MP4_RECORD)
+        int32_t StartRecord(const std::string &file_path);
         int32_t StopRecord();
+#endif
         int32_t StartTakePhotograph(video_common::VideoJpegGrap grap_config);
         int32_t StopTakePhotograph();
         int32_t StartSaveRawVideo();
@@ -289,9 +282,6 @@ namespace ecovacs
         std::unique_ptr<VideoH264EncodeElement> video_encode_element_;
         std::unique_ptr<VideoPushElement> video_push_element_;
         std::unique_ptr<VideoRtspPushElement> video_rtsp_push_element_;
-#if defined(ENABLE_LIBPEER)
-    std::unique_ptr<VideoLibpeerPushElement> video_libpeer_push_element_;
-#endif
 #if defined(ENABLE_WEBRTC)
     std::unique_ptr<VideoWebrtcPushElement> video_webrtc_push_element_;
 #endif
@@ -301,6 +291,11 @@ namespace ecovacs
 
         // 裸视频保存相关
         std::unique_ptr<RawVideoSaveElement> video_raw_video_save_element_;
+
+#if defined(ENABLE_MP4_RECORD)
+        // MP4 录像相关
+        std::unique_ptr<VideoMp4RecordElement> video_record_element_;
+#endif
     };
 
 } // namespace ecovacs

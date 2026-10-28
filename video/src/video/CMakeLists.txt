@@ -23,13 +23,15 @@ add_compile_options(-Wno-attributes)
 # ============================================================================
 option(USE_AW_PLATFORM "use aw platform flag" OFF)
 option(USE_RK_PLATFORM "use rk platform flag" OFF)
+option(USE_AM311X_PLATFORM "use am311x platform flag" OFF)
 option(ENABLE_ROS2 "enable ros2_humble flag" OFF)
 option(ENABLE_WEBSOCKETS "enable websockets flag" OFF)
 option(ENABLE_ICEORYX "enable iceoryx flag" OFF)
 option(ENABLE_ISP "enable ISP management" OFF)
 option(USE_LIVE555_RTSP "Use live555-based RTSP push (src/rtsp self-adapted wrapper) instead of xop" ON)
-option(ENABLE_LIBPEER "enable libpeer WebRTC push" OFF)
+option(ENABLE_MP4_RECORD "enable mp4 video recording" OFF)
 option(ENABLE_WEBRTC "enable official transport-only trimmed WebRTC push" OFF)
+
 
 # ============================================================================
 # 平台特定定义
@@ -40,6 +42,9 @@ if(USE_RK_PLATFORM)
 elseif(USE_AW_PLATFORM)
     add_definitions(-DAW_PLATFORM)
     set(PLATFORM_NAME "AW")
+elseif(USE_AM311X_PLATFORM)
+    add_definitions(-DAM311X_PLATFORM)
+    set(PLATFORM_NAME "AM311X")
 endif()
 
 # ========== ISP 功能启用检查 ==========
@@ -86,11 +91,11 @@ set(THIRD_PARTY_LIBS
     iceoryx
 )
 
-# libpeer（WebRTC）默认不启用：开启时才配置其头文件/库路径
-if(ENABLE_LIBPEER)
-    list(APPEND THIRD_PARTY_LIBS libpeer)
-endif()
 
+# MP4 录像：开启时才引入 mp4v2
+if(ENABLE_MP4_RECORD)
+    list(APPEND THIRD_PARTY_LIBS mp4v2)
+endif()
 # 官方裁剪栈 WebRTC 默认不启用（静态库自带 include 布局，单独配置）
 if(ENABLE_WEBRTC)
     set(WEBRTC_INSTALL ${THIRD_PARTY_BASE}/webrtc/install/root/usr)
@@ -107,6 +112,9 @@ if(USE_RK_PLATFORM)
 elseif(USE_AW_PLATFORM)
     # AW 平台特有库
     list(APPEND THIRD_PARTY_LIBS libcedarc libAWIspApi)
+elseif(USE_AM311X_PLATFORM)
+    # libvideo_codec.so → libmhal.so → libvpu.so，需直接链接
+    list(APPEND THIRD_PARTY_LIBS mhal vpulib)
 endif()
 
 # ============================================================================
@@ -140,9 +148,6 @@ if(USE_AW_PLATFORM)
     include_directories(${THIRD_PARTY_BASE}/libcedarc/install/root/usr/include/include)
     include_directories(${THIRD_PARTY_BASE}/libcedarc/install/root/usr/include/vencoder-base)
 endif()
-
-# Boost 特殊处理
-include_directories(${THIRD_PARTY_BASE}/boost/src/boost-1.80.0)
 
 
 # ============================================================================
@@ -283,21 +288,19 @@ else()
 endif()
 
 
-# Libpeer（WebRTC）支持：默认关闭，开启时编译 libpeer push 与信令客户端
-if(ENABLE_LIBPEER)
-    add_definitions(-DENABLE_LIBPEER)
-    set(LIBPEER_SOURCES
-        src/api_video_libpeer_push.cpp
-        src/signaling_client.c
+# MP4 录像支持：默认开启，关闭时不编译录像模块、不链接 video_recording/mp4v2
+if(ENABLE_MP4_RECORD)
+    add_definitions(-DENABLE_MP4_RECORD)
+    set(MP4_RECORD_SOURCES
+        src/api_video_record.cpp
     )
-    set(LIBPEER_LIBS libpeer.so)
-    message(STATUS "Libpeer support: ON (WebRTC)")
+    set(MP4_RECORD_LIBS libvideo_recording.so)
+    message(STATUS "MP4 recording support: ON")
 else()
-    set(LIBPEER_SOURCES)
-    set(LIBPEER_LIBS)
-    message(STATUS "Libpeer support: OFF")
+    set(MP4_RECORD_SOURCES)
+    set(MP4_RECORD_LIBS)
+    message(STATUS "MP4 recording support: OFF")
 endif()
-
 # WebRTC push now backed by ump's webrtc_transport component (which links
 # libwebrtc.a internally). video only needs the thin wrapper + ump lib.
 if(ENABLE_WEBRTC)
@@ -331,7 +334,6 @@ set(VIDEO_SOURCES
     src/api_jpeg_upload.cpp
     src/api_raw_video_save.cpp
     src/api_jpeg_publish.cpp
-    src/inproc_comm.cpp
     # 主程序
     src/main.cpp
 )
@@ -380,10 +382,9 @@ if(ENABLE_WEBSOCKETS)
     list(APPEND VIDEO_SOURCES ${WEBSOCKET_SOURCES})
 endif()
 
-if(ENABLE_LIBPEER)
-    list(APPEND VIDEO_SOURCES ${LIBPEER_SOURCES})
+if(ENABLE_MP4_RECORD)
+    list(APPEND VIDEO_SOURCES ${MP4_RECORD_SOURCES})
 endif()
-
 if(ENABLE_WEBRTC)
     list(APPEND VIDEO_SOURCES ${WEBRTC_SOURCES})
 endif()
@@ -440,6 +441,9 @@ if(USE_RK_PLATFORM)
     if(ENABLE_ISP)
         list(APPEND RK_LIBS librkaiq.so)
     endif()
+elseif(USE_AM311X_PLATFORM)
+    # libvideo_codec.so 动态依赖 libmhal.so → libvpu.so，需直接链接
+    set(AM311X_LIBS libmhal.so libvpu.so)
 endif()
 
 # ROS2 库
@@ -474,10 +478,12 @@ set(ALL_LIBS
     ${BASE_LIBS}
     ${OPTIONAL_LIBS}
     ${RK_LIBS}
+    ${AM311X_LIBS}
     ${ROS2_LIBS_FINAL}
     ${RTSP_BACKEND_LIBS}
-    ${LIBPEER_LIBS}
+    ${MP4_RECORD_LIBS}
     ${WEBRTC_LIBS}
+
 )
 
 # ============================================================================
@@ -492,11 +498,21 @@ endforeach()
 # ============================================================================
 # 安装配置
 # ============================================================================
-# 配置文件
+# 配置文件：根据平台选择对应的 video.json（安装到 etc/conf/ 下，与 video.sh 读取路径一致）
+if(USE_AM311X_PLATFORM)
+    install(FILES ${CMAKE_SOURCE_DIR}/conf/video_311x.json
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/etc/conf
+        RENAME video.json
+    )
+else()
+    install(FILES ${CMAKE_SOURCE_DIR}/conf/video.json
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/etc/conf
+    )
+endif()
+# 其他配置文件（toml 等）
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/conf
     DESTINATION ${CMAKE_INSTALL_PREFIX}/etc
-    FILES_MATCHING 
-    PATTERN "*.json"
+    FILES_MATCHING
     PATTERN "*.toml"
 )
 
@@ -557,7 +573,7 @@ message(STATUS "  Features:")
 message(STATUS "    ISP:          ${ENABLE_ISP}")
 message(STATUS "    WebSocket:    ${ENABLE_WEBSOCKETS}")
 message(STATUS "    Iceoryx:      ${ENABLE_ICEORYX}")
-message(STATUS "    Libpeer:      ${ENABLE_LIBPEER}")
+message(STATUS "    MP4 Record:   ${ENABLE_MP4_RECORD}")
 message(STATUS "    WebRTC:       ${ENABLE_WEBRTC}")
 message(STATUS "    ROS2:         ${ENABLE_ROS2}")
 message(STATUS "")

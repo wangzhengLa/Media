@@ -96,9 +96,9 @@ int main(int argc, char **argv)
 
     LOG_INFO("Program started");
 
-    // 640x480 resolution
-    const int32_t width = 640;
-    const int32_t height = 480;
+    // 1280x720 resolution (match ISP FR output)
+    const int32_t width = 1280;
+    const int32_t height = 720;
     int stride_y = width;
     int stride_uv = (width + 1) / 2;
 
@@ -110,14 +110,14 @@ int main(int argc, char **argv)
         return -1;
     }
 
-    FILE *fp_yuv = fopen("/tmp/factory_test_640_480_nv12.yuv", "rb");
+    FILE *fp_yuv = fopen("/tmp/factory_test_1280_720_nv12.yuv", "rb");
     if (!fp_yuv)
     {
-        LOG_ERROR("Cannot open /tmp/factory_test_640_480_nv12.yuv");
+        LOG_ERROR("Cannot open /tmp/factory_test_1280_720_nv12.yuv");
         return -1;
     }
 
-    LOG_INFO("Creating VideoFrameBuffer (640x480)...");
+    LOG_INFO("Creating VideoFrameBuffer (1280x720)...");
     std::unique_ptr<video_common::VideoFrameBuffer> buffer(
         new video_common::VideoFrameBuffer(width, height, stride_y, stride_uv));
     if (!buffer)
@@ -152,7 +152,7 @@ int main(int argc, char **argv)
 
     // Save test YUV file
     char file_path[128] = {0};
-    snprintf(file_path, sizeof(file_path), "/userdata/640x480_capture.yuv");
+    snprintf(file_path, sizeof(file_path), "/userdata/1280x720_capture.yuv");
     IUtilImageToFile(buffer->MutableDataY(), buffer->MutableDataUV(), NULL, width, height,
                      buffer->StrideY(), buffer->StrideUV(), 0, 1, file_path);
     LOG_INFO("Test YUV saved to: %s", file_path);

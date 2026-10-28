@@ -9,8 +9,6 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <optional>
-#include <queue>
 #include <string>
 #include <thread>
 #include <vector>
@@ -38,6 +36,7 @@ public:
     void OnDataChannel(scoped_refptr<webrtc::DataChannelInterface>) override {}
     void OnIceCandidate(const webrtc::IceCandidate*) override {}
     void OnIceGatheringChange(webrtc::PeerConnectionInterface::IceGatheringState s) override;
+    void OnIceConnectionChange(webrtc::PeerConnectionInterface::IceConnectionState s) override;
     bool WaitIceComplete(std::chrono::milliseconds timeout, const std::atomic<bool>& quit);
     void OnConnectionChange(webrtc::PeerConnectionInterface::PeerConnectionState s) override;
 private:
@@ -124,32 +123,24 @@ public:
     void SetVideoEncoder(IWebrtcVideoEncoder* e) override;
     void SetViewerListener(IWebrtcViewerListener* l) override;
     void SetAudioReceiver(IWebrtcAudioReceiver* r) override;  // TODO: not implemented
+    void SetVideoReceiver(IWebrtcVideoReceiver* r) override;  // TODO: not implemented
     bool Started() const override;
 
     int32_t Start() override;
     int32_t Stop() override;
-    void SendH264Frame(const uint8_t* data, size_t size, bool keyframe) override;
-    void SendG711Frame(const uint8_t* data, size_t size) override;
+    void SendVideoFrame(const uint8_t* data, size_t size, bool keyframe) override;
+    void SendAudioFrame(const uint8_t* data, size_t size) override;
 
 private:
-    struct FrameHolder {
-        uint8_t* data = nullptr;
-        size_t size = 0;
-        bool keyframe = false;
-        void RelRef() { delete[] data; data = nullptr; }
-        ~FrameHolder() { delete[] data; }
-    };
-
     struct PeerContext {
-        int id = 0;
         std::string peer_id;
         scoped_refptr<webrtc::PeerConnectionFactoryInterface> owned_factory;
         scoped_refptr<webrtc::PeerConnectionInterface> pc;
-        scoped_refptr<webrtc::VideoTrackInterface> track;
+        scoped_refptr<webrtc::VideoTrackInterface> video_track;
         scoped_refptr<webrtc::AudioTrackInterface> audio_track;
         std::unique_ptr<PushingObserver> observer;
-        std::shared_ptr<ExternalH264Encoder::Registry> registry;
-        std::shared_ptr<ExternalG711Encoder::Registry> audio_registry;
+        std::shared_ptr<ExternalVideoEncoder::Registry> video_registry;
+        std::shared_ptr<ExternalAudioEncoder::Registry> audio_registry;
         std::atomic<bool> connected{false};
         bool need_keyframe = true;
     };
@@ -160,21 +151,17 @@ private:
     std::string HandleOffer(std::shared_ptr<PeerContext> peer, const std::string& offer_sdp);
     void RemoveDeadPeers();
     void RunSignaling();
-    void SendLoop();
 
     WebrtcTransportConfig config_;
     IWebrtcVideoEncoder* video_encoder_ = nullptr;
     IWebrtcViewerListener* viewer_listener_ = nullptr;
     IWebrtcAudioReceiver* audio_receiver_ = nullptr;  // TODO: not wired to libwebrtc yet
+    IWebrtcVideoReceiver* video_receiver_ = nullptr;  // TODO: not wired to libwebrtc yet
     std::atomic<bool> started_{false}, quit_{false}, sig_quit_{false};
-    std::thread send_thread_, mailbox_thread_;
+    std::thread mailbox_thread_;
     std::unique_ptr<webrtc::Thread> network_thread_, signaling_thread_;
     scoped_refptr<webrtc::VideoTrackSourceInterface> track_source_;
     std::shared_ptr<BitrateAggregator> aggregator_;
-    std::atomic<int> next_viewer_id_{0};
-    uint64_t start_time_us_ = 0;
-    std::mutex q_mu_;
-    std::queue<std::shared_ptr<FrameHolder>> frame_q_;
     std::mutex peers_mu_;
     std::vector<std::shared_ptr<PeerContext>> peers_;
 };

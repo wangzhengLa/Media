@@ -3,7 +3,7 @@ PROJ_NAME = ump
 GIT_BRANCH = master
 GIT_VER := $(shell cat VERSION)
 PROJ_VER = $(GIT_BRANCH)
-PROJ_REL = 15
+PROJ_REL = 17
 PKG_NAME = $(PROJ_NAME)-$(PROJ_VER)-$(GIT_VER)-$(PROJ_REL)-$(HOST_ARCH)-$(FP_FLAG).pkg.tar.xz
 PROJECT = ${PROJECT_TYPE}
 
@@ -24,7 +24,8 @@ DEPS = \
     tinyxml2:fetchPkg \
     zlog:fetchPkg \
     speexdsp:fetchPkg \
-    webrtc-audio-processing:fetchPkg
+    webrtc-audio-processing:fetchPkg \
+	webrtc:fetchPkg \
 
 fetchDeps:
 	@for dep in $(DEPS); do \

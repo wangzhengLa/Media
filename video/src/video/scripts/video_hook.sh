@@ -61,14 +61,6 @@ stop_rtsp_push() {
 	${UBUS_CMD} stop_rtsp_push
 }
 
-start_libpeer_push() {
-	${UBUS_CMD} start_libpeer_push
-}
-
-stop_libpeer_push() {
-	${UBUS_CMD} stop_libpeer_push
-}
-
 start_webrtc_push() {
 	${UBUS_CMD} start_webrtc_push
 }
@@ -93,6 +85,14 @@ stop_qr_identify() {
 	${UBUS_CMD} stop_qr_identify
 }
 
+start_record() {
+	${UBUS_CMD} start_record "{\"file_path\":\"$1\"}"
+}
+
+stop_record() {
+	${UBUS_CMD} stop_record
+}
+
 show_usage() {
 	echo "Usage: $0 <command> [arguments]"
 	echo ""
@@ -107,17 +107,18 @@ show_usage() {
 	echo "  stop_push                     - Stop video push"
 	echo "  start_rtsp_push          - Start video rtsp push"
 	echo "  stop_rtsp_push           - Stop video rtsp push"
-	echo "  start_libpeer_push       - Start video libpeer(WebRTC) push"
-	echo "  stop_libpeer_push        - Stop video libpeer(WebRTC) push"
 	echo "  start_webrtc_push       - Start video official WebRTC push"
 	echo "  stop_webrtc_push        - Stop video official WebRTC push"
 	echo "  start_jpeg_pub                - Start JPEG publishing"
 	echo "  stop_jpeg_pub                 - Stop JPEG publishing"
 	echo "  start_qr_identify             - Start QR code identification"
 	echo "  stop_qr_identify              - Stop QR code identification"
+	echo "  start_record <file_path>      - Start MP4 recording to specified path"
+	echo "  stop_record                   - Stop MP4 recording"
 	echo ""
 	echo "Examples:"
 	echo "  $0 grap_pic /tmp/test.jpg"
+	echo "  $0 start_record /tmp/test.mp4"
 	echo "  $0 set_bitrate 2000"
 	echo "  $0 start_ai"
 	echo ""
@@ -155,12 +156,6 @@ case "$1" in
 	stop_rtsp_push)
 		stop_rtsp_push
 		;;
-	start_libpeer_push)
-		start_libpeer_push
-		;;
-	stop_libpeer_push)
-		stop_libpeer_push
-		;;
 	start_webrtc_push)
 		start_webrtc_push
 		;;
@@ -178,6 +173,12 @@ case "$1" in
 		;;
 	stop_qr_identify)
 		stop_qr_identify
+		;;
+	start_record)
+		start_record "$2"
+		;;
+	stop_record)
+		stop_record
 		;;
 	help|-h|--help)
 		show_usage

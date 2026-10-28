@@ -8,7 +8,7 @@
 
 // WebRTC transport wrapper (official trimmed libwebrtc stack).
 //
-// Encapsulates PeerConnection / SDP / ICE / WebSocket signaling / H264
+// Encapsulates PeerConnection / SDP / ICE / WebSocket signaling / video
 // frame injection so upper layers (video push) only deal with a clean
 // interface.  This header deliberately includes NO WebRTC headers: the
 // .cpp is compiled with special flags (C++20, -fno-rtti) required by
@@ -17,10 +17,10 @@
 // Design (inspired by AWS KVS WebRTC SDK master/viewer model):
 //   - The device acts as MASTER (callee): it waits for incoming offers
 //     from viewers (phone / browser) and replies with answers.
-//   - Each viewer gets its own PeerConnection + H264 encoder instance,
+//   - Each viewer gets its own PeerConnection + video encoder instance,
 //     so multiple viewers can watch simultaneously.
-//   - A single encoded H264 frame is fanned out to every connected
-//     viewer's encoder via SendH264Frame().
+//   - A single encoded video frame is fanned out to every connected
+//     viewer's encoder via SendVideoFrame().
 namespace ecovacs
 {
     // Bandwidth estimate callback target. The hardware encoder implements
@@ -36,20 +36,22 @@ namespace ecovacs
 
     // Viewer lifecycle events. Upper layers may use these to show
     // connection status or start/stop the encoder pipeline.
+    //   peer_id: signaling-layer identifier of the viewer (matches the
+    //            "peer_id" field in the offer / bye messages).
     class IWebrtcViewerListener
     {
     public:
         virtual ~IWebrtcViewerListener() = default;
-        virtual void OnViewerConnected(int viewer_id) = 0;
-        virtual void OnViewerDisconnected(int viewer_id) = 0;
+        virtual void OnViewerConnected(const std::string& peer_id) = 0;
+        virtual void OnViewerDisconnected(const std::string& peer_id) = 0;
     };
 
     // Audio frame receiver (browser -> device).
     //
-    // When enable_audio_recv is true, libwebrtc decodes the incoming audio
-    // RTP from the browser and delivers the PCM samples here.  The upper
-    // layer (e.g. audio player / AEC reference) implements this interface
-    // to consume the decoded audio.
+    // libwebrtc decodes the incoming audio RTP from the browser and
+    // delivers the PCM samples here.  The upper layer (e.g. audio player
+    // / AEC reference) implements this interface to consume the decoded
+    // audio.
     //
     // TODO: not implemented yet.  The call path will be:
     //   libwebrtc audio receive track -> OnData -> AudioSinkInterface
@@ -59,16 +61,45 @@ namespace ecovacs
     public:
         virtual ~IWebrtcAudioReceiver() = default;
         // Decoded PCM audio from a viewer.
-        //   viewer_id  : which viewer sent the audio
+        //   peer_id    : which viewer sent the audio (signaling peer_id)
         //   pcm        : signed 16-bit PCM samples, interleaved if stereo
         //   samples    : number of samples per channel
         //   sample_rate: sample rate in Hz (e.g. 48000, 16000)
         //   channels   : number of channels (1 = mono, 2 = stereo)
-        virtual void OnAudioFrame(int viewer_id,
+        virtual void OnAudioFrame(const std::string& peer_id,
                                   const int16_t* pcm,
                                   size_t samples,
                                   int sample_rate,
                                   int channels) = 0;
+    };
+
+    // Video frame receiver (browser -> device).
+    //
+    // On embedded the incoming video is delivered as H.264 encoded frames
+    // (NOT decoded) so the upper layer can feed them into the hardware
+    // decoder (cedarv / mpp).  libwebrtc's internal software decoder is
+    // bypassed via the encoded-frame callback.
+    //
+    // TODO: not implemented yet.  The call path will be:
+    //   libwebrtc video receive stream -> encoded frame callback
+    //   -> webrtc::EncodedImage (H.264 Annex-B NALs)
+    //   -> deliver to this callback.
+    class IWebrtcVideoReceiver
+    {
+    public:
+        virtual ~IWebrtcVideoReceiver() = default;
+        // Encoded H.264 frame from a viewer.
+        //   peer_id     : which viewer sent the video (signaling peer_id)
+        //   h264_data   : H.264 bitstream in Annex-B format (with start
+        //                 codes); may contain multiple NAL units
+        //   size        : byte length of h264_data
+        //   is_keyframe : true if this frame is an IDR / keyframe
+        //   timestamp_us: frame timestamp in microseconds
+        virtual void OnVideoEncodedFrame(const std::string& peer_id,
+                                         const uint8_t* h264_data,
+                                         size_t size,
+                                         bool is_keyframe,
+                                         int64_t timestamp_us) = 0;
     };
 
     struct WebrtcTransportConfig
@@ -79,22 +110,9 @@ namespace ecovacs
         std::string turn_url;
         std::string turn_username;
         std::string turn_password;
-        int video_fps = 15;
         // Maximum number of simultaneous viewers.  Each viewer costs one
         // PeerConnection + encoder, so keep this modest on embedded.
         int max_viewers = 4;
-
-        // ---- Audio ----
-        // Device -> browser: when true, an audio track is added to every
-        // PeerConnection and pre-encoded G.711 (PCMA) frames can be sent
-        // via SendG711Frame().
-        bool enable_audio = false;
-
-        // Browser -> device (two-way call). When true, the transport
-        // accepts incoming audio from viewers and delivers decoded PCM
-        // to the IWebrtcAudioReceiver set via SetAudioReceiver().
-        // TODO: not implemented yet, interface reserved.
-        bool enable_audio_recv = false;
     };
 
     class WebrtcTransport
@@ -115,18 +133,20 @@ namespace ecovacs
         virtual void SetViewerListener(IWebrtcViewerListener* listener) = 0;
 
         // Optional: receive decoded PCM audio from viewers (browser -> device).
-        // Only active when config.enable_audio_recv == true.
         // TODO: not implemented yet, interface reserved.
         virtual void SetAudioReceiver(IWebrtcAudioReceiver* receiver) = 0;
 
-        // Inject a raw Annex-B H264 access unit. The frame is fanned out
-        // to every connected viewer's RTP packetizer.
-        virtual void SendH264Frame(const uint8_t* data, size_t size, bool keyframe) = 0;
+        // Optional: receive encoded H.264 video from viewers (browser -> device).
+        // TODO: not implemented yet, interface reserved.
+        virtual void SetVideoReceiver(IWebrtcVideoReceiver* receiver) = 0;
 
-        // Inject a pre-encoded G.711 A-law (PCMA) frame (20ms @ 8kHz mono
-        // = 160 bytes).  Fanned out to every connected viewer.  Only
-        // active when config.enable_audio == true.
-        virtual void SendG711Frame(const uint8_t* data, size_t size) = 0;
+        // Inject an encoded video frame. The frame is fanned out to every
+        // connected viewer's RTP packetizer.  Current codec: H.264 Annex-B.
+        virtual void SendVideoFrame(const uint8_t* data, size_t size, bool keyframe) = 0;
+
+        // Inject a pre-encoded audio frame.  Fanned out to every connected
+        // viewer.  Current codec: G.711 PCMA (10ms @ 8kHz mono = 80 bytes).
+        virtual void SendAudioFrame(const uint8_t* data, size_t size) = 0;
     };
 
 } // namespace ecovacs
