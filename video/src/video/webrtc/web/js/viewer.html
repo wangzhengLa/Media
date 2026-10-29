@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebRTC H264 viewer (caller)</title>
+<style>
+  body { font-family: sans-serif; margin: 24px; background:#111; color:#eee; }
+  video { width: 640px; max-width:100%; background:#000; border:1px solid #444; }
+  #state { margin:12px 0; font-family:monospace; white-space:pre-wrap; max-height:260px; overflow:auto; }
+  input, button { font-size:16px; padding:6px 10px; }
+  button { margin-left:8px; }
+</style>
+</head>
+<body>
+  <h3>WebRTC H264 viewer</h3>
+  <div>
+    room: <input id="room" size="16">
+    <button id="join">Start</button>
+    <button id="leave">Stop</button>
+  </div>
+  <div id="state">idle</div>
+  <video id="v" autoplay playsinline></video>
+
+<script>
+'use strict';
+const roomInput = document.getElementById('room');
+const stateEl = document.getElementById('state');
+const videoEl = document.getElementById('v');
+
+const params = new URLSearchParams(location.search);
+roomInput.value = params.get('room') || 'room1';
+
+let ws = null;
+let pc = null;
+let running = false;
+let reconnectTimer = null;
+let peerId = null;
+
+function ts() {
+  const d = new Date();
+  return d.toTimeString().slice(0, 8);
+}
+function log(msg) {
+  const line = `[${ts()}] ${msg}`;
+  stateEl.textContent = line + '\n' + stateEl.textContent;
+}
+
+// Viewer is the caller: connects, creates an offer, sends it, waits for answer.
+function wsUrl(room) {
+  let host = location.host;
+  if (!host) host = '10.10.103.194:8080'; // file:// fallback
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  return `${proto}://${host}/ws?room=${encodeURIComponent(room)}&role=caller`;
+}
+
+function teardownPc() {
+  if (pc) {
+    try { pc.close(); } catch (e) {}
+    pc = null;
+  }
+  videoEl.srcObject = null;
+}
+
+// Create a PeerConnection and send an offer to the device (callee).
+function startOffer() {
+  teardownPc();
+  pc = new RTCPeerConnection({ iceServers: [] });
+  log('new PeerConnection, creating offer');
+
+  pc.ontrack = (ev) => {
+    log(`ontrack kind=${ev.track.kind}`);
+    if (videoEl.srcObject !== ev.streams[0])
+      videoEl.srcObject = ev.streams[0];
+  };
+  pc.oniceconnectionstatechange = () =>
+    log(`ICE connection: ${pc.iceConnectionState}`);
+  pc.onconnectionstatechange = () => {
+    log(`peer state: ${pc.connectionState}`);
+    if (pc.connectionState === 'connected')
+      log('CONNECTED - media should play');
+  };
+
+  // We need at least one transceiver to get an m= line in the offer.
+  // recvonly video transceiver — device sends, viewer receives.
+  pc.addTransceiver('video', { direction: 'recvonly' });
+  // recvonly audio transceiver — device sends G.711, viewer receives.
+  pc.addTransceiver('audio', { direction: 'recvonly' });
+
+  // Trickle ICE: send the offer immediately (no candidates yet), then
+  // forward each candidate as it is gathered via a separate "candidate"
+  // message. This avoids waiting for STUN/TURN gathering to finish.
+  pc.onicecandidate = (ev) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const c = ev.candidate;
+    ws.send(JSON.stringify({
+      type: 'candidate',
+      candidate: c ? c.candidate : '',
+      sdpMid: c ? c.sdpMid : '',
+      sdpMLineIndex: c ? c.sdpMLineIndex : 0,
+    }));
+    if (c) log(`candidate sent: ${c.candidate.slice(0, 60)}...`);
+    else log('ICE gathering complete (end-of-candidates)');
+  };
+
+  pc.createOffer()
+    .then((offer) => pc.setLocalDescription(offer))
+    .then(() => sendOffer(pc.localDescription.sdp))
+    .catch((err) => log('createOffer error: ' + err));
+}
+
+function handleCandidate(msg) {
+  if (!pc) return;
+  if (!msg.candidate) {
+    log('remote ICE gathering complete');
+    return;
+  }
+  pc.addIceCandidate({
+    candidate: msg.candidate,
+    sdpMid: msg.sdpMid,
+    sdpMLineIndex: msg.sdpMLineIndex,
+  }).catch((err) => log('addIceCandidate error: ' + err));
+}
+
+function sendOffer(sdp) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: 'offer', sdp }));
+  log(`offer sent, sdp_len=${sdp.length}`);
+}
+
+function handleAnswer(sdp) {
+  if (!pc) return;
+  pc.setRemoteDescription({ type: 'answer', sdp })
+    .then(() => log('answer applied'))
+    .catch((err) => log('setRemoteDescription error: ' + err));
+}
+
+function connect() {
+  const room = roomInput.value.trim() || 'room1';
+  const url = wsUrl(room);
+  log('connecting ' + url);
+  ws = new WebSocket(url);
+
+  ws.onopen = () => log('WebSocket open, role=caller');
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (msg.type === 'joined') {
+      peerId = msg.peer_id || null;
+      log(`joined room "${msg.room}" as ${msg.role} peer_id=${peerId}`);
+      // Kick off negotiation once joined.
+      startOffer();
+    } else if (msg.type === 'answer') {
+      handleAnswer(msg.sdp);
+    } else if (msg.type === 'candidate') {
+      handleCandidate(msg);
+    } else if (msg.type === 'bye') {
+      log('device left');
+      teardownPc();
+    } else if (msg.type === 'offer_timeout') {
+      // Device never came online within the server's wait window.
+      log(`CALL FAILED: ${msg.reason || 'device not online'}`);
+      running = false;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      teardownPc();
+    } else if (msg.type === 'callers') {
+      log('callers: ' + (msg.rooms || []).map(r => r.room).join(','));
+    }
+  };
+  ws.onclose = () => {
+    teardownPc();
+    if (running) {
+      log('WebSocket closed, reconnect in 1s');
+      reconnectTimer = setTimeout(connect, 1000);
+    }
+  };
+  ws.onerror = () => log('WebSocket error');
+}
+
+document.getElementById('join').onclick = () => {
+  if (running) return;
+  running = true;
+  connect();
+};
+document.getElementById('leave').onclick = () => {
+  running = false;
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  if (ws) ws.close();
+  teardownPc();
+  log('stopped');
+};
+</script>
+</body>
+</html>

@@ -41,18 +41,10 @@ void PushingObserver::OnSignalingChange(webrtc::PeerConnectionInterface::Signali
 
 void PushingObserver::OnIceGatheringChange(webrtc::PeerConnectionInterface::IceGatheringState s) {
     ump_info("[webrtc] ICE gathering state -> %d\n", static_cast<int>(s));
-    if (s == webrtc::PeerConnectionInterface::kIceGatheringComplete) {
-        std::lock_guard<std::mutex> g(ice_mu_); ice_complete_ = true; ice_cv_.notify_all();
-    }
 }
 
 void PushingObserver::OnIceConnectionChange(webrtc::PeerConnectionInterface::IceConnectionState s) {
     ump_info("[webrtc] ICE connection state -> %d\n", static_cast<int>(s));
-}
-
-bool PushingObserver::WaitIceComplete(std::chrono::milliseconds timeout, const std::atomic<bool>& quit) {
-    std::unique_lock<std::mutex> lk(ice_mu_);
-    return ice_cv_.wait_for(lk, timeout, [&] { return ice_complete_ || quit.load(std::memory_order_acquire); });
 }
 
 void PushingObserver::OnConnectionChange(webrtc::PeerConnectionInterface::PeerConnectionState s) {
@@ -253,6 +245,11 @@ std::shared_ptr<WebrtcTransportImpl::PeerContext> WebrtcTransportImpl::CreatePee
             // periodic cleanup (for ICE failures) or DestroyFactory (stop).
         }
     };
+    peer->observer->on_ice_candidate = [this, weak](const webrtc::IceCandidate* c) {
+        auto p = weak.lock();
+        if (!p) return;
+        SendIceCandidate(p->peer_id, c);
+    };
 
     webrtc::PeerConnectionInterface::RTCConfiguration rtc;
     if (!config_.stun_url.empty()) {
@@ -332,9 +329,8 @@ std::string WebrtcTransportImpl::HandleOffer(std::shared_ptr<PeerContext> peer, 
     if (!set_local->Wait(sig_quit_)) {
         ump_error("[webrtc] SetLocalDescription failed: %s\n", set_local->error().c_str()); return {};
     }
-    if (!peer->observer->WaitIceComplete(std::chrono::seconds(10), sig_quit_)) {
-        ump_warn("[webrtc] ICE gathering timeout, sending answer anyway\n");
-    }
+    // Trickle ICE: send the answer immediately; candidates are forwarded
+    // separately via OnIceCandidate -> SendIceCandidate.
     std::string sdp;
     bool ok = signaling_thread_->BlockingCall([&] {
         const webrtc::SessionDescriptionInterface* local = peer->pc->local_description();
@@ -342,8 +338,29 @@ std::string WebrtcTransportImpl::HandleOffer(std::shared_ptr<PeerContext> peer, 
         return local->ToString(&sdp) && !sdp.empty();
     });
     if (!ok) { ump_error("[webrtc] serialize answer SDP failed\n"); return {}; }
-    ump_info("[webrtc] answer ready, sdp_len=%zu\n", sdp.size());
+    ump_info("[webrtc] answer ready (trickle), sdp_len=%zu\n", sdp.size());
     return sdp;
+}
+
+void WebrtcTransportImpl::SendIceCandidate(const std::string& peer_id,
+                                           const webrtc::IceCandidate* candidate) {
+    std::string frame;
+    if (!candidate) {
+        // End-of-candidates marker.
+        frame = "{\"type\":\"candidate\",\"candidate\":\"\"";
+    } else {
+        std::string sdp;
+        if (!candidate->ToString(&sdp)) return;
+        frame = "{\"type\":\"candidate\",\"candidate\":\"" + JsonEscape(sdp) + "\"";
+        frame += ",\"sdpMid\":\"" + JsonEscape(candidate->sdp_mid()) + "\"";
+        frame += ",\"sdpMLineIndex\":" + std::to_string(candidate->sdp_mline_index());
+    }
+    if (!peer_id.empty()) frame += ",\"peer_id\":\"" + JsonEscape(peer_id) + "\"";
+    frame += "}";
+    std::lock_guard<std::mutex> lk(ws_mu_);
+    if (ws_) ws_->SendText(frame);
+    ump_info("[webrtc] ICE candidate sent (peer_id=%s)%s\n",
+             peer_id.c_str(), candidate ? "" : " (end-of-candidates)");
 }
 
 void WebrtcTransportImpl::RemoveDeadPeers() {
@@ -389,13 +406,21 @@ void WebrtcTransportImpl::RunSignaling() {
             SleepInterruptible(std::chrono::seconds(1), sig_quit_); continue;
         }
         ump_info("[webrtc] ws connected as callee, room=%s\n", ep.room.c_str());
+        {
+            std::lock_guard<std::mutex> lk(ws_mu_);
+            ws_ = &ws;
+        }
 
         std::string msg;
         bool joined = false;
         while (!sig_quit_.load(std::memory_order_acquire)) {
             using Ev = WsSignalingClient::Event;
             Ev ev = ws.RecvText(10000, sig_quit_, msg);
-            if (ev == Ev::kQuit) return;
+            if (ev == Ev::kQuit) {
+                std::lock_guard<std::mutex> lk(ws_mu_);
+                ws_ = nullptr;
+                return;
+            }
             if (ev == Ev::kTimeout) { RemoveDeadPeers(); continue; }
             if (ev != Ev::kText) { ump_error("[webrtc] ws closed, reconnect\n"); break; }
 
@@ -470,7 +495,46 @@ void WebrtcTransportImpl::RunSignaling() {
                     }
                 }
                 if (to_close) to_close->Close();
+            } else if (type == "candidate") {
+                // Trickle ICE: apply a remote (browser) candidate to the
+                // matching peer's PeerConnection.
+                std::string cand, mid, peer_id;
+                JsonGetString(msg, "candidate", cand);
+                JsonGetString(msg, "sdpMid", mid);
+                JsonGetString(msg, "peer_id", peer_id);
+                int mline = 0;
+                {
+                    const std::string key = "\"sdpMLineIndex\"";
+                    size_t pos = msg.find(key);
+                    if (pos != std::string::npos) {
+                        pos += key.size();
+                        while (pos < msg.size() &&
+                               (msg[pos] == ' ' || msg[pos] == ':'))
+                            ++pos;
+                        mline = std::atoi(msg.c_str() + pos);
+                    }
+                }
+                if (cand.empty()) continue;  // end-of-candidates, no-op
+                std::lock_guard<std::mutex> lk(peers_mu_);
+                for (auto& p : peers_) {
+                    if (p->peer_id == peer_id && p->pc) {
+                        webrtc::SdpParseError error;
+                        auto ic = webrtc::CreateIceCandidate(mid, mline, cand, &error);
+                        if (ic) {
+                            p->pc->AddIceCandidate(std::move(ic));
+                            ump_info("[webrtc] ICE candidate added (peer_id=%s, mline=%d)\n",
+                                     peer_id.c_str(), mline);
+                        } else {
+                            ump_warn("[webrtc] parse ICE candidate failed: %s\n",
+                                     error.description.c_str());
+                        }
+                    }
+                }
             }
+        }
+        {
+            std::lock_guard<std::mutex> lk(ws_mu_);
+            ws_ = nullptr;
         }
         RemoveDeadPeers();
         SleepInterruptible(std::chrono::seconds(1), sig_quit_);

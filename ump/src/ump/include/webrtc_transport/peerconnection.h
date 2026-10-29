@@ -22,6 +22,7 @@
 #include "rtc_base/thread.h"
 
 namespace ecovacs {
+class WsSignalingClient;  // forward decl
 namespace wt {
 
 using webrtc::scoped_refptr;
@@ -32,17 +33,16 @@ using webrtc::scoped_refptr;
 class PushingObserver : public webrtc::PeerConnectionObserver {
 public:
     std::function<void(bool)> on_connection_edge;
+    std::function<void(const webrtc::IceCandidate*)> on_ice_candidate;
     void OnSignalingChange(webrtc::PeerConnectionInterface::SignalingState s) override;
     void OnDataChannel(scoped_refptr<webrtc::DataChannelInterface>) override {}
-    void OnIceCandidate(const webrtc::IceCandidate*) override {}
+    void OnIceCandidate(const webrtc::IceCandidate* c) override {
+        if (on_ice_candidate) on_ice_candidate(c);
+    }
     void OnIceGatheringChange(webrtc::PeerConnectionInterface::IceGatheringState s) override;
     void OnIceConnectionChange(webrtc::PeerConnectionInterface::IceConnectionState s) override;
-    bool WaitIceComplete(std::chrono::milliseconds timeout, const std::atomic<bool>& quit);
     void OnConnectionChange(webrtc::PeerConnectionInterface::PeerConnectionState s) override;
 private:
-    std::mutex ice_mu_;
-    std::condition_variable ice_cv_;
-    bool ice_complete_ = false;
     bool connected_ = false;
 };
 
@@ -151,6 +151,10 @@ private:
     std::string HandleOffer(std::shared_ptr<PeerContext> peer, const std::string& offer_sdp);
     void RemoveDeadPeers();
     void RunSignaling();
+    // Called from PushingObserver::OnIceCandidate (signaling thread) to push
+    // a trickle-ICE candidate out over the signaling WebSocket.
+    void SendIceCandidate(const std::string& peer_id,
+                          const webrtc::IceCandidate* candidate);
 
     WebrtcTransportConfig config_;
     IWebrtcVideoEncoder* video_encoder_ = nullptr;
@@ -164,6 +168,11 @@ private:
     std::shared_ptr<BitrateAggregator> aggregator_;
     std::mutex peers_mu_;
     std::vector<std::shared_ptr<PeerContext>> peers_;
+    // Signaling WebSocket handle, owned by RunSignaling's loop.  Set under
+    // ws_mu_ so SendIceCandidate (called from libwebrtc's signaling thread)
+    // can safely send without racing a reconnect.
+    std::mutex ws_mu_;
+    WsSignalingClient* ws_ = nullptr;
 };
 
 } // namespace wt
