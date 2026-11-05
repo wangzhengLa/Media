@@ -238,6 +238,9 @@ namespace ecovacs
         if (EncodeStarted() && vem_)
         {
             vem_->SetRates(parameters);
+            // frame_rate_ctl_.SetMaxFramerate((double)parameters.framerate_fps);
+            // ump_info("[webrtc] SetRates bitrate=%u bps fps=%u\n",
+            //          parameters.target_bitrate, parameters.framerate_fps);
         }
         return 0;
     }

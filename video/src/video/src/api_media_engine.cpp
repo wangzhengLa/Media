@@ -951,11 +951,27 @@ namespace ecovacs
 
         if (!video_webrtc_push_element_->video_push_->PushStarted())
         {
-            // 从配置中读取降噪等级
+            // 从配置中读取降噪等级、AEC 开关及 ALSA 声道布局
             video_webrtc_push_element_->video_push_->SetAudioNoiseLevel(
                 media_engine_cfg_.pusher_cfg_.audio_noise_level);
-            ump_info("[webrtc] push: audio_noise_level=[%d]\r\n",
-                     media_engine_cfg_.pusher_cfg_.audio_noise_level);
+            video_webrtc_push_element_->video_push_->SetAecEnabled(
+                media_engine_cfg_.pusher_cfg_.aec_enabled != 0);
+            video_webrtc_push_element_->video_push_->SetAudioDevice(
+                media_engine_cfg_.pusher_cfg_.audio_device);
+            video_webrtc_push_element_->video_push_->SetAudioCaptureChannels(
+                media_engine_cfg_.pusher_cfg_.audio_capture_channels);
+            video_webrtc_push_element_->video_push_->SetAudioMicChannel(
+                media_engine_cfg_.pusher_cfg_.audio_mic_channel);
+            video_webrtc_push_element_->video_push_->SetAudioRefChannel(
+                media_engine_cfg_.pusher_cfg_.audio_ref_channel);
+            ump_info("[webrtc] push: noise_level=[%d], aec=[%d], device=[%s], "
+                     "capture_ch=[%d], mic_ch=[%d], ref_ch=[%d]\r\n",
+                     media_engine_cfg_.pusher_cfg_.audio_noise_level,
+                     media_engine_cfg_.pusher_cfg_.aec_enabled,
+                     media_engine_cfg_.pusher_cfg_.audio_device.c_str(),
+                     media_engine_cfg_.pusher_cfg_.audio_capture_channels,
+                     media_engine_cfg_.pusher_cfg_.audio_mic_channel,
+                     media_engine_cfg_.pusher_cfg_.audio_ref_channel);
 
             video_webrtc_push_element_->video_push_->StartPush();
         }

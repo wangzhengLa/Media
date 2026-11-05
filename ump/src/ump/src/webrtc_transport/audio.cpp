@@ -129,6 +129,7 @@ std::unique_ptr<webrtc::AudioEncoder> ExternalAudioEncoderFactory::Create(
 FakeAudioDeviceModule::FakeAudioDeviceModule() = default;
 FakeAudioDeviceModule::~FakeAudioDeviceModule() {
     StopRecording();
+    StopPlayout();
 }
 
 int32_t FakeAudioDeviceModule::RegisterAudioCallback(webrtc::AudioTransport* cb) {
@@ -139,6 +140,7 @@ int32_t FakeAudioDeviceModule::RegisterAudioCallback(webrtc::AudioTransport* cb)
 int32_t FakeAudioDeviceModule::Init() { initialized_ = true; return 0; }
 int32_t FakeAudioDeviceModule::Terminate() {
     StopRecording();
+    StopPlayout();
     initialized_ = false;
     return 0;
 }
@@ -156,6 +158,19 @@ int32_t FakeAudioDeviceModule::StopRecording() {
     return 0;
 }
 
+int32_t FakeAudioDeviceModule::StartPlayout() {
+    if (playing_) return 0;
+    playing_ = true;
+    play_thread_ = std::thread(&FakeAudioDeviceModule::PlayoutThread, this);
+    return 0;
+}
+
+int32_t FakeAudioDeviceModule::StopPlayout() {
+    playing_ = false;
+    if (play_thread_.joinable()) play_thread_.join();
+    return 0;
+}
+
 void FakeAudioDeviceModule::CaptureThread() {
     // 10ms @ 8kHz mono 16-bit = 160 bytes
     static constexpr size_t kSamples = 80;
@@ -169,6 +184,29 @@ void FakeAudioDeviceModule::CaptureThread() {
                 silence, kSamples, 2 /*bytesPerSample*/, 1 /*nChannels*/,
                 8000 /*samplesPerSec*/, 0 /*totalDelayMS*/, 0 /*clockDrift*/,
                 mic_level, false /*keyPressed*/, mic_level);
+        }
+        next += std::chrono::milliseconds(10);
+        std::this_thread::sleep_until(next);
+    }
+}
+
+void FakeAudioDeviceModule::PlayoutThread() {
+    // Pull mixed audio from the AudioMixer every 10ms.  This drives the
+    // receive pipeline: ChannelReceive::GetAudioFrame decodes incoming
+    // RTP and delivers PCM to the raw audio sink (RemoteAudioSource),
+    // which fans out to AudioTrack sinks (our RemoteAudioSink).
+    // 10ms @ 48kHz mono 16-bit = 960 bytes.
+    static constexpr size_t kSamples = 480;
+    int16_t render_buf[kSamples * 2];  // stereo scratch, ignored
+    size_t samples_out = 0;
+    int64_t elapsed_ms = 0, ntp_ms = 0;
+    auto next = std::chrono::steady_clock::now();
+    while (playing_) {
+        if (audio_cb_) {
+            audio_cb_->NeedMorePlayData(
+                kSamples, 2 /*bytesPerSample*/, 1 /*nChannels*/,
+                48000 /*samplesPerSec*/, render_buf,
+                samples_out, &elapsed_ms, &ntp_ms);
         }
         next += std::chrono::milliseconds(10);
         std::this_thread::sleep_until(next);

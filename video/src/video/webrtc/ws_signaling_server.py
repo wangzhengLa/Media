@@ -35,6 +35,7 @@ import base64
 import hashlib
 import json
 import socket
+import ssl
 import struct
 import threading
 import time
@@ -450,16 +451,27 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="ubuild WebSocket signaling server")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--ssl-cert", default=None,
+                        help="Path to TLS certificate file (enables HTTPS/WSS)")
+    parser.add_argument("--ssl-key", default=None,
+                        help="Path to TLS private key file")
     args = parser.parse_args()
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.daemon_threads = True
+    if args.ssl_cert and args.ssl_key:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(certfile=args.ssl_cert, keyfile=args.ssl_key)
+        server.socket = ctx.wrap_socket(server.socket, server_side=True)
+        proto = "https"
+    else:
+        proto = "http"
     stop_event = threading.Event()
     sweep_thread = threading.Thread(target=pending_offer_sweeper,
                                     args=(stop_event,), daemon=True)
     sweep_thread.start()
-    print(f"[WS] signaling listening on ws://{args.host}:{args.port}/ws?room=<n>&role=caller|callee")
+    print(f"[WS] signaling listening on {proto}://{args.host}:{args.port}/ws?room=<n>&role=caller|callee")
     print(f"[WS] device role=callee, viewer role=caller")
-    print(f"[WS] viewer: http://<this-host>:{args.port}/js/viewer.html?room=<n>")
+    print(f"[WS] viewer: {proto}://<this-host>:{args.port}/js/viewer.html?room=<n>")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

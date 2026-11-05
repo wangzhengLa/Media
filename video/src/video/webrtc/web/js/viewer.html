@@ -9,32 +9,44 @@
   video { width: 640px; max-width:100%; background:#000; border:1px solid #444; }
   #state { margin:12px 0; font-family:monospace; white-space:pre-wrap; max-height:260px; overflow:auto; }
   input, button { font-size:16px; padding:6px 10px; }
-  button { margin-left:8px; }
+  button { margin-left:8px; cursor:pointer; }
+  button.active { background:#2a7; color:#fff; border-color:#2a7; }
 </style>
 </head>
 <body>
   <h3>WebRTC H264 viewer</h3>
   <div>
     room: <input id="room" size="16">
-    <button id="join">Start</button>
-    <button id="leave">Stop</button>
+    <button id="recvBtn">仅观看</button>
+    <button id="callBtn">双向通话</button>
   </div>
   <div id="state">idle</div>
-  <video id="v" autoplay playsinline></video>
+  <video id="v" autoplay playsinline muted></video>
+  <audio id="a" autoplay playsinline></audio>
 
 <script>
 'use strict';
 const roomInput = document.getElementById('room');
 const stateEl = document.getElementById('state');
 const videoEl = document.getElementById('v');
+const audioEl = document.getElementById('a');
+const recvBtn = document.getElementById('recvBtn');
+const callBtn = document.getElementById('callBtn');
 
 const params = new URLSearchParams(location.search);
 roomInput.value = params.get('room') || 'room1';
 
 let ws = null;
 let pc = null;
+let localStream = null;   // tracks from getUserMedia, must be stop()'d on teardown
 let running = false;
+let currentMode = null;   // null | 'recv' | 'call'
+let sessionGen = 0;       // bumped on every stop/cleanup; stale callbacks check this
 let reconnectTimer = null;
+let pcReconnectTimer = null;
+let pcReconnectBackoff = 1000;   // starts at 1s, caps at 5s
+let pcReconnectCount = 0;         // current failed-reconnect attempts
+const MAX_PC_RECONNECT = 5;       // give up after this many failed attempts
 let peerId = null;
 
 function ts() {
@@ -54,43 +66,153 @@ function wsUrl(room) {
   return `${proto}://${host}/ws?room=${encodeURIComponent(room)}&role=caller`;
 }
 
+// Tear down the current PC and release local media tracks.
 function teardownPc() {
+  if (pcReconnectTimer) { clearTimeout(pcReconnectTimer); pcReconnectTimer = null; }
   if (pc) {
     try { pc.close(); } catch (e) {}
     pc = null;
   }
+  // Release mic/camera tracks so the hardware indicator turns off and
+  // the device is freed for the next getUserMedia() call.
+  if (localStream) {
+    localStream.getTracks().forEach((t) => t.stop());
+    localStream = null;
+  }
   videoEl.srcObject = null;
+  audioEl.srcObject = null;
+}
+
+// Close the WebSocket and tear down the PC, bumping sessionGen so that
+// any in-flight callbacks (onmessage, onclose, getUserMedia, ICE) from
+// the previous session become no-ops.  Does NOT touch running/currentMode.
+function cleanupConnection() {
+  sessionGen++;
+  if (ws) {
+    const old = ws;
+    ws = null;
+    // Detach handlers BEFORE close() so the async onclose can't fire
+    // against the new session's state.
+    old.onopen = old.onmessage = old.onclose = old.onerror = null;
+    try { old.close(); } catch (e) {}
+  }
+  teardownPc();
+  peerId = null;
+}
+
+// Re-negotiate after the PeerConnection went to "failed".  We must NOT
+// re-send an offer on the same WebSocket: the device creates a new peer
+// for every offer, so the old peer would linger and consume a viewer
+// slot.  Instead close the WS (server sends bye to clear the old peer),
+// then reconnect to get a fresh peer_id.
+function schedulePcReconnect() {
+  if (!running) return;
+  if (pcReconnectTimer) return;
+  if (pcReconnectCount >= MAX_PC_RECONNECT) {
+    stopSession(`reconnect failed after ${MAX_PC_RECONNECT} attempts, giving up`);
+    return;
+  }
+  const delay = pcReconnectBackoff;
+  const mode = currentMode;
+  pcReconnectCount++;
+  log(`peer failed, reconnect attempt ${pcReconnectCount}/${MAX_PC_RECONNECT} in ${delay}ms`);
+  pcReconnectTimer = setTimeout(() => {
+    pcReconnectTimer = null;
+    pcReconnectBackoff = Math.min(pcReconnectBackoff * 2, 5000);
+    cleanupConnection();          // close WS + tear down PC, keep running/mode
+    connect();                    // fresh WS -> fresh peer_id -> fresh offer
+  }, delay);
 }
 
 // Create a PeerConnection and send an offer to the device (callee).
-function startOffer() {
+// mode: 'recv' = recv-only (no mic/cam), 'call' = bidirectional (mic+cam).
+// g: session generation captured by the caller; if it changes during an
+//    await (user switched/stopped), we abandon and release any resources.
+async function startOffer(mode, g) {
   teardownPc();
-  pc = new RTCPeerConnection({ iceServers: [] });
-  log('new PeerConnection, creating offer');
+  const myPc = pc = new RTCPeerConnection({ iceServers: [] });
+  log(`new PeerConnection (mode=${mode}), creating offer`);
 
-  pc.ontrack = (ev) => {
+  myPc.ontrack = (ev) => {
+    if (g !== sessionGen || pc !== myPc) return;
     log(`ontrack kind=${ev.track.kind}`);
-    if (videoEl.srcObject !== ev.streams[0])
-      videoEl.srcObject = ev.streams[0];
+    if (ev.track.kind === 'audio') {
+      if (audioEl.srcObject !== ev.streams[0])
+        audioEl.srcObject = ev.streams[0];
+    } else if (ev.track.kind === 'video') {
+      if (videoEl.srcObject !== ev.streams[0])
+        videoEl.srcObject = ev.streams[0];
+    }
   };
-  pc.oniceconnectionstatechange = () =>
-    log(`ICE connection: ${pc.iceConnectionState}`);
-  pc.onconnectionstatechange = () => {
-    log(`peer state: ${pc.connectionState}`);
-    if (pc.connectionState === 'connected')
+  myPc.oniceconnectionstatechange = () => {
+    if (g !== sessionGen || pc !== myPc) return;
+    log(`ICE connection: ${myPc.iceConnectionState}`);
+  };
+  myPc.onsignalingstatechange = () => {
+    if (g !== sessionGen || pc !== myPc) return;
+    log(`signaling state: ${myPc.signalingState}`);
+  };
+  myPc.onconnectionstatechange = () => {
+    if (g !== sessionGen || pc !== myPc) return;
+    log(`peer state: ${myPc.connectionState}`);
+    if (myPc.connectionState === 'connected') {
       log('CONNECTED - media should play');
+      pcReconnectBackoff = 1000;
+      pcReconnectCount = 0;
+    } else if (myPc.connectionState === 'failed') {
+      schedulePcReconnect();
+    }
   };
 
-  // We need at least one transceiver to get an m= line in the offer.
-  // recvonly video transceiver — device sends, viewer receives.
-  pc.addTransceiver('video', { direction: 'recvonly' });
-  // recvonly audio transceiver — device sends G.711, viewer receives.
-  pc.addTransceiver('audio', { direction: 'recvonly' });
+  if (mode === 'call') {
+    // Bidirectional audio call: send microphone only, do NOT send the
+    // browser camera.  The device does not need the viewer's video, so
+    // we skip it to save upstream bandwidth and encoding cost.  Video
+    // transceiver is recvonly so the viewer still sees the device feed.
+    log('requesting getUserMedia (audio only)...');
+    let stream = null;
+    try {
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+          video: false
+        });
+        log('microphone acquired');
+      } else {
+        log('navigator.mediaDevices unavailable (not HTTPS/localhost)');
+      }
+    } catch (err) {
+      log('getUserMedia error: ' + err);
+    }
 
-  // Trickle ICE: send the offer immediately (no candidates yet), then
-  // forward each candidate as it is gathered via a separate "candidate"
-  // message. This avoids waiting for STUN/TURN gathering to finish.
-  pc.onicecandidate = (ev) => {
+    // After every await we may have been stopped/switched.
+    if (g !== sessionGen || pc !== myPc) {
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
+
+    if (stream) {
+      localStream = stream;
+      stream.getAudioTracks().forEach((track) => myPc.addTrack(track, stream));
+      myPc.addTransceiver('video', { direction: 'recvonly' });
+      log('audio sendrecv + video recvonly enabled');
+    } else {
+      // Mic unavailable — transparently downgrade to recv-only and
+      // reflect the real mode on the buttons.
+      currentMode = 'recv';
+      updateButtons();
+      myPc.addTransceiver('video', { direction: 'recvonly' });
+      myPc.addTransceiver('audio', { direction: 'recvonly' });
+      log('mic unavailable, downgraded to recv-only');
+    }
+  } else {
+    myPc.addTransceiver('video', { direction: 'recvonly' });
+    myPc.addTransceiver('audio', { direction: 'recvonly' });
+    log('recv-only transceivers added (video+audio)');
+  }
+
+  myPc.onicecandidate = (ev) => {
+    if (g !== sessionGen || pc !== myPc) return;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const c = ev.candidate;
     ws.send(JSON.stringify({
@@ -103,10 +225,19 @@ function startOffer() {
     else log('ICE gathering complete (end-of-candidates)');
   };
 
-  pc.createOffer()
-    .then((offer) => pc.setLocalDescription(offer))
-    .then(() => sendOffer(pc.localDescription.sdp))
-    .catch((err) => log('createOffer error: ' + err));
+  log('calling pc.createOffer()...');
+  try {
+    const offer = await myPc.createOffer();
+    if (g !== sessionGen || pc !== myPc) return;
+    log(`createOffer OK, sdp_len=${offer.sdp.length}, calling setLocalDescription`);
+    await myPc.setLocalDescription(offer);
+    if (g !== sessionGen || pc !== myPc) return;
+    log('setLocalDescription OK, sending offer');
+    sendOffer(myPc.localDescription.sdp);
+  } catch (err) {
+    if (g !== sessionGen || pc !== myPc) return;
+    log('createOffer/setLocalDescription error: ' + err);
+  }
 }
 
 function handleCandidate(msg) {
@@ -136,59 +267,112 @@ function handleAnswer(sdp) {
 }
 
 function connect() {
+  const g = sessionGen;
   const room = roomInput.value.trim() || 'room1';
   const url = wsUrl(room);
+  const sock = new WebSocket(url);
+  ws = sock;
   log('connecting ' + url);
-  ws = new WebSocket(url);
 
-  ws.onopen = () => log('WebSocket open, role=caller');
-  ws.onmessage = (ev) => {
+  sock.onopen = () => {
+    if (g !== sessionGen || ws !== sock) return;
+    log('WebSocket open, role=caller');
+  };
+  sock.onmessage = (ev) => {
+    if (g !== sessionGen || ws !== sock) return;
     let msg;
     try { msg = JSON.parse(ev.data); } catch (e) { return; }
     if (msg.type === 'joined') {
       peerId = msg.peer_id || null;
       log(`joined room "${msg.room}" as ${msg.role} peer_id=${peerId}`);
-      // Kick off negotiation once joined.
-      startOffer();
+      startOffer(currentMode, g);
     } else if (msg.type === 'answer') {
       handleAnswer(msg.sdp);
     } else if (msg.type === 'candidate') {
       handleCandidate(msg);
     } else if (msg.type === 'bye') {
-      log('device left');
-      teardownPc();
+      // Device left or restarted — fully reset so the user can re-join.
+      stopSession('device left');
     } else if (msg.type === 'offer_timeout') {
-      // Device never came online within the server's wait window.
-      log(`CALL FAILED: ${msg.reason || 'device not online'}`);
-      running = false;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      teardownPc();
+      stopSession(`CALL FAILED: ${msg.reason || 'device not online'}`);
     } else if (msg.type === 'callers') {
       log('callers: ' + (msg.rooms || []).map(r => r.room).join(','));
     }
   };
-  ws.onclose = () => {
+  sock.onclose = () => {
+    if (g !== sessionGen || ws !== sock) return;
     teardownPc();
     if (running) {
       log('WebSocket closed, reconnect in 1s');
       reconnectTimer = setTimeout(connect, 1000);
     }
   };
-  ws.onerror = () => log('WebSocket error');
+  sock.onerror = () => {
+    if (g !== sessionGen || ws !== sock) return;
+    log('WebSocket error');
+  };
 }
 
-document.getElementById('join').onclick = () => {
+// Update button visual state based on currentMode.  Both buttons stay
+// enabled so the user can switch modes in one click (互斥切换靠
+// toggleMode + cleanupConnection 的代次互锁保证安全).
+function updateButtons() {
+  if (currentMode === 'recv') {
+    recvBtn.textContent = '停止观看';
+    recvBtn.classList.add('active');
+    callBtn.textContent = '双向通话';
+    callBtn.classList.remove('active');
+  } else if (currentMode === 'call') {
+    callBtn.textContent = '结束通话';
+    callBtn.classList.add('active');
+    recvBtn.textContent = '仅观看';
+    recvBtn.classList.remove('active');
+  } else {
+    recvBtn.textContent = '仅观看';
+    callBtn.textContent = '双向通话';
+    recvBtn.classList.remove('active');
+    callBtn.classList.remove('active');
+  }
+}
+
+// Start a session in the given mode ('recv' or 'call').
+function startSession(mode) {
   if (running) return;
   running = true;
+  currentMode = mode;
+  pcReconnectBackoff = 1000;
+  pcReconnectCount = 0;
+  updateButtons();
   connect();
-};
-document.getElementById('leave').onclick = () => {
+}
+
+// Stop the current session: invalidate all in-flight callbacks, close the
+// WS (with handlers detached first), tear down the PC, release media.
+function stopSession(reason = 'stopped') {
   running = false;
-  if (reconnectTimer) clearTimeout(reconnectTimer);
-  if (ws) ws.close();
-  teardownPc();
-  log('stopped');
-};
+  currentMode = null;
+  pcReconnectBackoff = 1000;
+  pcReconnectCount = 0;
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  cleanupConnection();
+  updateButtons();
+  log(reason);
+}
+
+// Toggle a mode button: if already active, stop; otherwise switch to it.
+// Switching is safe because cleanupConnection bumps sessionGen, making
+// the old session's getUserMedia/ICE/WS callbacks no-ops.
+function toggleMode(mode) {
+  if (currentMode === mode) {
+    stopSession();
+  } else {
+    if (running) stopSession();
+    startSession(mode);
+  }
+}
+
+recvBtn.onclick = () => toggleMode('recv');
+callBtn.onclick = () => toggleMode('call');
 </script>
 </body>
 </html>

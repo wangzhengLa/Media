@@ -113,11 +113,11 @@ public:
     int32_t InitPlayout() override { playout_init_ = true; return 0; }
     bool PlayoutIsInitialized() const override { return playout_init_; }
     int32_t RecordingIsAvailable(bool* available) override { *available = true; return 0; }
-    int32_t InitRecording() override { rec_init_ = true; return 0; }
-    bool RecordingIsInitialized() const override { return rec_init_; }
+    int32_t InitRecording() override { cap_init_ = true; return 0; }
+    bool RecordingIsInitialized() const override { return cap_init_; }
 
-    int32_t StartPlayout() override { playing_ = true; return 0; }
-    int32_t StopPlayout() override { playing_ = false; return 0; }
+    int32_t StartPlayout() override;
+    int32_t StopPlayout() override;
     bool Playing() const override { return playing_; }
     int32_t StartRecording() override;
     int32_t StopRecording() override;
@@ -167,13 +167,15 @@ public:
 
 private:
     void CaptureThread();
+    void PlayoutThread();
     webrtc::AudioTransport* audio_cb_ = nullptr;
     std::thread cap_thread_;
+    std::thread play_thread_;
     std::atomic<bool> capture_{false};
-    bool initialized_ = false;
-    bool playout_init_ = false;
-    bool rec_init_ = false;
-    bool playing_ = false;
+    std::atomic<bool> playing_{false};
+    std::atomic<bool> initialized_{false};
+    std::atomic<bool> playout_init_{false};
+    std::atomic<bool> cap_init_{false};
     mutable std::atomic<int> ref_count_{0};
 };
 

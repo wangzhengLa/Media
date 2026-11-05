@@ -32,6 +32,11 @@ namespace ecovacs
     public:
         virtual ~IWebrtcVideoEncoder() = default;
         virtual void OnRatesChanged(uint32_t bitrate_bps, uint32_t framerate_fps) = 0;
+        // Request an immediate IDR / keyframe from the hardware encoder.
+        // Triggered when a remote viewer sends PLI or FIR after packet loss.
+        // Implementations should throttle (e.g. >= 300ms between requests)
+        // because the encoder is shared across all viewers.
+        virtual void OnKeyFrameRequested() = 0;
     };
 
     // Viewer lifecycle events. Upper layers may use these to show
@@ -113,6 +118,12 @@ namespace ecovacs
         // Maximum number of simultaneous viewers.  Each viewer costs one
         // PeerConnection + encoder, so keep this modest on embedded.
         int max_viewers = 4;
+        // Video source parameters for the dummy track source.  These should
+        // match the hardware encoder's actual output so libwebrtc's internal
+        // resolution/framerate estimates stay consistent with reality.
+        uint32_t video_width = 1280;
+        uint32_t video_height = 720;
+        uint32_t video_fps = 25;
     };
 
     class WebrtcTransport

@@ -36,6 +36,10 @@ namespace ecovacs
         void OnFrame(video_common::VideoFrameBuffer *frame_buffer) override;
         void SetSkipFrames(int count) { skip_frames_.store(count, std::memory_order_release); }
 
+        int GetWidth() const { return cfg_.width; }
+        int GetHeight() const { return cfg_.height; }
+        uint32_t GetMaxFramerate() const { return cfg_.maxFramerate; }
+
     private:
         bool EncodeProcess();
 

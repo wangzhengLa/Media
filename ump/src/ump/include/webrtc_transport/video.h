@@ -29,17 +29,22 @@ namespace ecovacs {
 namespace wt {
 
 // =====================================================================
-//  BitrateAggregator: picks the min GCC target across all viewers so
-//  the shared hardware encoder never exceeds the bottleneck link.
+//  VideoRateController: picks the min GCC target (bitrate + fps) across
+//  all viewers so the shared hardware encoder never exceeds the
+//  bottleneck link.
 // =====================================================================
-class BitrateAggregator {
+class VideoRateController {
 public:
+    struct ViewerRate {
+        uint32_t bps = 0;
+        uint32_t fps = 0;
+    };
     void SetVideoEncoder(IWebrtcVideoEncoder* e);
-    void Update(class ExternalVideoEncoder* enc, uint32_t bitrate_bps, uint32_t fps);
+    void Update(class ExternalVideoEncoder* enc, uint32_t bps, uint32_t fps);
     void Remove(class ExternalVideoEncoder* enc);
 private:
     std::mutex mu_;
-    std::unordered_map<ExternalVideoEncoder*, uint32_t> bitrates_;
+    std::unordered_map<ExternalVideoEncoder*, ViewerRate> rates_;
     IWebrtcVideoEncoder* video_encoder_ = nullptr;
     uint32_t last_br_ = 0, last_fps_ = 0;
 };
@@ -54,7 +59,7 @@ public:
     struct Registry {
         ExternalVideoEncoder* active = nullptr;
         IWebrtcVideoEncoder* video_encoder = nullptr;
-        std::shared_ptr<BitrateAggregator> aggregator;
+        std::shared_ptr<VideoRateController> rate_controller;
     };
     explicit ExternalVideoEncoder(std::shared_ptr<Registry> r);
     ~ExternalVideoEncoder() override;
@@ -100,8 +105,7 @@ private:
 
 class ExternalVideoTrackSource : public webrtc::VideoTrackSource {
 public:
-    static constexpr int kW = 640, kH = 480;
-    ExternalVideoTrackSource();
+    ExternalVideoTrackSource(uint32_t width, uint32_t height, uint32_t fps);
     ~ExternalVideoTrackSource() override;
 protected:
     webrtc::VideoSourceInterface<webrtc::VideoFrame>* source() override;
@@ -110,6 +114,7 @@ private:
     std::optional<webrtc::VideoFrame> black_;
     std::atomic<bool> quit_{false};
     std::thread feeder_;
+    uint32_t width_ = 0, height_ = 0, fps_ = 0;
 };
 
 } // namespace wt

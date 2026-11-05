@@ -329,6 +329,7 @@ namespace ecovacs
     }
 
     bool WsSignalingClient::SendAll(const void* data, size_t n) {
+        std::lock_guard<std::mutex> lk(send_mu_);
         size_t off = 0;
         const auto* p = static_cast<const uint8_t*>(data);
         while (off < n) {
@@ -344,11 +345,22 @@ namespace ecovacs
 
     bool WsSignalingClient::SendControl(uint8_t opcode,
                                         const std::string& payload) {
-        uint8_t hdr[4] = {static_cast<uint8_t>(0x80 | opcode),
-                          static_cast<uint8_t>(payload.size()), 0, 0};
-        return SendAll(hdr, 2) &&
-               (payload.empty() ||
-                SendAll(payload.data(), payload.size()));
+        // Build a single masked frame and send it in one SendAll() call so the
+        // frame is atomic on the wire (SendAll holds send_mu_ for the whole
+        // write).  As a WebSocket client, every frame we send MUST be masked
+        // (RFC 6455 5.3), otherwise the server rejects the connection.
+        uint8_t mask_key[4];
+        RandomBytes(mask_key, sizeof(mask_key));
+        const size_t plen = payload.size();
+        std::string frame;
+        frame.reserve(2 + 4 + plen);
+        frame.push_back(static_cast<char>(0x80 | opcode));  // FIN + opcode
+        frame.push_back(static_cast<char>(0x80 | plen));    // mask bit + len
+        frame.append(reinterpret_cast<const char*>(mask_key), 4);
+        for (size_t i = 0; i < plen; ++i)
+            frame.push_back(static_cast<char>(
+                static_cast<uint8_t>(payload[i]) ^ mask_key[i % 4]));
+        return SendAll(frame.data(), frame.size());
     }
 
     bool WsSignalingClient::Handshake(const WsEndpoint& ep, const char* role) {
@@ -472,10 +484,14 @@ namespace ecovacs
         const size_t len = text.size();
         if (len < 126) {
             frame.push_back(static_cast<char>(0x80 | len));
-        } else {
+        } else if (len <= 65535) {
             frame.push_back(static_cast<char>(0x80 | 126));
             frame.push_back(static_cast<char>((len >> 8) & 0xFF));
             frame.push_back(static_cast<char>(len & 0xFF));
+        } else {
+            frame.push_back(static_cast<char>(0x80 | 127));
+            for (int i = 7; i >= 0; --i)
+                frame.push_back(static_cast<char>((len >> (i * 8)) & 0xFF));
         }
         frame.append(reinterpret_cast<const char*>(mask_key), 4);
         for (size_t i = 0; i < len; ++i)
@@ -521,7 +537,7 @@ namespace ecovacs
             uint8_t mask[4] = {};
             if (masked && !RecvExact(mask, 4))
                 return Event::kError;
-            if (plen > 65536)
+            if (plen > 4 * 1024 * 1024)
                 return Event::kError;
             std::string chunk(static_cast<size_t>(plen), '\0');
             if (plen && !RecvExact(&chunk[0], static_cast<size_t>(plen)))

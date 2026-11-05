@@ -344,14 +344,15 @@ namespace ecovacs
         FramerateController::FramerateController(double max_framerate) : max_framerate_(max_framerate) {}
         FramerateController::~FramerateController() {}
 
-        void FramerateController::SetMaxFramerate(double max_framerate) { max_framerate_ = max_framerate; }
-        double FramerateController::GetMaxFramerate() const { return max_framerate_; }
+        void FramerateController::SetMaxFramerate(double max_framerate) { max_framerate_.store(max_framerate, std::memory_order_relaxed); }
+        double FramerateController::GetMaxFramerate() const { return max_framerate_.load(std::memory_order_relaxed); }
 
         bool FramerateController::ShouldDropFrame(int64_t in_timestamp_ns)
         {
-            if (max_framerate_ < kMinFramerate)
+            double max_framerate = max_framerate_.load(std::memory_order_relaxed);
+            if (max_framerate < kMinFramerate)
                 return true;
-            int64_t frame_interval_ns = kNumNanosecsPerSec / max_framerate_;
+            int64_t frame_interval_ns = kNumNanosecsPerSec / max_framerate;
             if (frame_interval_ns <= 0)
                 return false;
             if (next_frame_timestamp_ns_)
@@ -371,7 +372,7 @@ namespace ecovacs
 
         void FramerateController::Reset()
         {
-            max_framerate_ = std::numeric_limits<double>::max();
+            max_framerate_.store(std::numeric_limits<double>::max(), std::memory_order_relaxed);
             next_frame_timestamp_ns_ = boost::none;
         }
 
@@ -379,9 +380,10 @@ namespace ecovacs
         {
             if (ShouldDropFrame(in_timestamp_ns))
             {
-                if (max_framerate_ < kMinFramerate)
+                double max_framerate = max_framerate_.load(std::memory_order_relaxed);
+                if (max_framerate < kMinFramerate)
                     return;
-                int64_t frame_interval_ns = kNumNanosecsPerSec / max_framerate_;
+                int64_t frame_interval_ns = kNumNanosecsPerSec / max_framerate;
                 if (next_frame_timestamp_ns_)
                     *next_frame_timestamp_ns_ += frame_interval_ns;
             }

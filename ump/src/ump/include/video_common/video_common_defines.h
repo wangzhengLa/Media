@@ -404,7 +404,7 @@ namespace ecovacs
             void KeepFrame(int64_t in_timestamp_ns);
 
         private:
-            double max_framerate_;
+            std::atomic<double> max_framerate_;
             boost::optional<int64_t> next_frame_timestamp_ns_;
         };
 

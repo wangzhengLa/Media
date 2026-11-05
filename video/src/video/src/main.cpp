@@ -18,6 +18,7 @@ extern "C"
 
 #include "api_media_engine.h"
 #include "video_common_defines.h"
+#include "sysdbg_boost.h"
 #include "frame_subscriber.h"
 #include "image_subscriber.h"
 #include "string_subscriber.h"
@@ -681,7 +682,7 @@ int main(int argc, char **argv)
         printf("Another instance is already running. Exiting.\n");
         return -1;
     }
-
+    register_crash_handler();
     // 注册退出时清理 PID 文件
     atexit(remove_pid_file);
 

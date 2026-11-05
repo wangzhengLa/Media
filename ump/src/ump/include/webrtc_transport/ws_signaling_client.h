@@ -2,6 +2,7 @@
 #define WS_SIGNALING_CLIENT_H_
 
 #include <atomic>
+#include <mutex>
 #include <string>
 
 namespace ecovacs
@@ -27,7 +28,7 @@ namespace ecovacs
 
     // Minimal RFC 6455 client used by the WebRTC push worker:
     // blocking socket, masked client text frames, automatic pong replies,
-    // single-frame messages up to 64KiB. No external dependency.
+    // single-frame messages up to 4 MiB. No external dependency.
     class WsSignalingClient
     {
     public:
@@ -60,6 +61,9 @@ namespace ecovacs
         bool Handshake(const WsEndpoint& ep, const char* role);
 
         int fd_ = -1;
+        // Serializes all writes to fd_ (SendText from signaling thread and
+        // SendControl pong replies from RecvText on the mailbox thread).
+        std::mutex send_mu_;
         // Bytes read past the HTTP upgrade header (the server may send the
         // first WebSocket frame in the same TCP segment as the 101 reply);
         // RecvExact drains these before touching the socket.
