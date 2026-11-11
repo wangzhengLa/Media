@@ -1,0 +1,33 @@
+#!/bin/sh
+
+[ -z "$1" ] && echo "Error: should be run by udhcpc6" && exit 1
+
+setup_interface() {
+	echo "udhcpc6: lease of $ipv6 obtained, lease time $lease"
+	#echo "udhcpc6: lease of $ipv6prefix prefix obtained, lease time $ipv6prefix_lease"
+
+	echo "===== update ipv6 default route ${ipv6:0:19}::1 to $interface start ===="
+	host_ipv6=$(cat /proc/net/if_inet6 | grep "${ipv6:0:4}${ipv6:5:4}${ipv6:10:4}${ipv6:15:4}")
+	sleep_time=1
+
+	while [ "$host_ipv6" == "" -a $sleep_time -lt 10 ]
+	do
+		echo "--sleep $sleep_time second to wait bound ipv6--"
+		sleep 1
+		host_ipv6=$(cat /proc/net/if_inet6 | grep "${ipv6:0:4}${ipv6:5:4}${ipv6:10:4}${ipv6:15:4}")
+		sleep_time=`expr $sleep_time + 1`
+	done
+
+	ip -6 route change default via ${ipv6:0:19}::1 dev $interface
+	echo "===== update ipv6 default route ${ipv6:0:19}::1 to $interface stop ===="
+}
+
+case "$1" in
+	deconfig)
+	;;
+	renew)
+	;;
+	bound)
+		setup_interface
+	;;
+esac

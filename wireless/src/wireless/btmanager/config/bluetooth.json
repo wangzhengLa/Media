@@ -1,0 +1,13 @@
+{
+	"profile":{
+		"a2dp_sink":0,
+		"a2dp_source":0,
+		"avrcp":0,
+		"hfp_hf":0,
+		"hfp_ag":0,
+		"spp":0,
+		"gatt_server":1,
+		"gatt_client":1,
+		"smp":0
+	}
+}

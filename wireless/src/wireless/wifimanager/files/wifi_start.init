@@ -1,0 +1,19 @@
+#!/bin/sh /etc/rc.common
+# Copyright (C) 2006-2011 OpenWrt.org
+
+START=96
+STOP=98
+
+DEPEND=done
+
+start() {
+       wifi_daemon > /dev/console
+       sleep 3
+       wifi -o sta > /dev/console
+       sleep 3
+       echo "Starting wifi_daemon....:" > /dev/console
+}
+
+stop() {
+       echo "Stopping wifi_deamon:" > /dev/console
+}
