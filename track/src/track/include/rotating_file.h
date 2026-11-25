@@ -5,7 +5,7 @@
 #include <cstddef>
 
 // 带轮转的追加写文件：单文件超过 max_size_kb 时按 keep_count 份滚动覆盖。
-// 轮转规则（与原 track.log 一致）：
+// 轮转规则：
 //   例如 keep_count=5，文件为 <name>、<name>.1 ... <name>.4；
 //   超限时删除最旧 <name>.4，依次 .3->.4 .2->.3 .1->.2，当前 <name>->.1，新建空 <name>。
 // 非线程安全（调用方在单线程 tick 循环中使用）。

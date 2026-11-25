@@ -73,7 +73,7 @@ bool any_alert_active() {
     return st_avail.active;
 }
 
-// ---------- 拍 TOP N 内存快照（写入主日志 track.log，不另建文件）----------
+// ---------- 拍 TOP N 内存快照（写入主日志 track.log）----------
 // 告警时扫描 /proc 一次：RSS 是瞬时值，无需 baseline，故只在快照时扫描，稳态零额外开销。
 void take_snapshot(const TrackConfig& cfg) {
     if (!cfg.mem_snapshot_on_alert) return;
@@ -194,7 +194,7 @@ void mem_monitor_tick(const TrackConfig& cfg) {
         }
         g_last_log_ms = now;
         Logger::log(LogLevel::INFO,
-            "mem monitor: total=%.1fMB avail=%.1fMB thr=%dMB debounce=%d",
+            "mem: total=%.1fMB avail=%.1fMB thr=%dMB debounce=%d",
             g_total_kb / 1024.0, g_avail_kb / 1024.0,
             cfg.mem_available_threshold_mb, cfg.mem_alert_duration);
         return;

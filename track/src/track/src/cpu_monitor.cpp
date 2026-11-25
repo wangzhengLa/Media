@@ -473,7 +473,7 @@ void cpu_monitor_tick(const TrackConfig& cfg) {
         }
         g_last_scan_wall_ms = now;
 
-        Logger::log(LogLevel::INFO, "cpu monitor: ncpu=%d hz=%ld page=%ldKB sample=%ds snap_window=%ds total_thr=%d%%",
+        Logger::log(LogLevel::INFO, "cpu: ncpu=%d hz=%ld page=%ldKB sample=%ds snap_window=%ds total_thr=%d%%",
                     g_ncpu, g_hz, g_page_kb, cfg.check_interval, cfg.check_interval, cfg.cpu_total_threshold);
         return;
     }
