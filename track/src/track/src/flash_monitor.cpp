@@ -1,11 +1,3 @@
-// Flash 监控模块：纯 statvfs，不阻塞主循环。
-// 口径：
-//   - used% = (f_blocks - f_bavail) / f_blocks * 100；用 f_bavail（非 root 可用）反映真实可写空间
-//   - 按 f_fsid 去重（同文件系统只告警一次），只读分区（ST_RDONLY）跳过告警
-//   - 周期概览逐路径打印；告警时统计触发分区挂载目录下"一级子项"的占用，取前 N
-//     （哪个分区超阈值就看哪个分区；用 du -sbx 取大小，不跨挂载点、不跟随符号链接，timeout 兜底防阻塞）
-//   - 逐行写入主日志 track.log；cooldown 按 f_fsid 独立
-// 观察式：仅日志，不自动干预。
 
 #include "flash_monitor.h"
 #include "logger.h"
@@ -27,13 +19,6 @@
 #include <sys/types.h>
 
 namespace {
-
-// ---------- 时间 ----------
-long long now_ms() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
 
 // ---------- 路径解析（空格分隔） ----------
 std::vector<std::string> split_ws(const std::string& s) {
@@ -83,51 +68,66 @@ bool stat_one(const std::string& path, FsInfo& out) {
     return true;
 }
 
-// ---------- 状态 ----------
-bool g_inited = false;
-long long g_last_log_ms = 0;
+// ---------- 状态（模块私有，收拢所有 file-scope 变量）----------
+struct State {
+    bool inited = false;
+    std::vector<std::string> paths;                  // 解析后的监控路径
+    std::map<std::string, AlertState> fs_alert;     // fsid_key -> 告警状态（去重后每个唯一 fs 一个）
+    std::map<std::string, long long> last_snap_ms;  // fsid_key -> 上次快照时间（每个分区独立冷却）
+};
+State state;
 
-std::vector<std::string> g_paths;                  // 解析后的监控路径
-std::map<std::string, AlertState> g_fs_alert;     // fsid_key -> 告警状态（去重后每个唯一 fs 一个）
-std::map<std::string, long long> g_last_snap_ms;  // fsid_key -> 上次快照时间（每个分区独立冷却）
+// ---------- 递归统计路径表观大小（字节），等价于 du -sbx ----------
+// 为什么不用 popen("du ...")：设备 rootfs 的 busybox 未启用 CONFIG_TIMEOUT，
+constexpr unsigned long long kMaxDuEntries = 20000;
 
-bool any_alert_active() {
-    for (auto& kv : g_fs_alert) {
-        if (kv.second.active) return true;
+unsigned long long dir_apparent_size(const std::string& path) {
+    struct stat root_st;
+    if (lstat(path.c_str(), &root_st) != 0) return 0;
+    const dev_t root_dev = root_st.st_dev;
+
+    unsigned long long total = root_st.st_size;
+    unsigned long long count = 1;
+
+    std::vector<std::string> stack;
+    stack.push_back(path);
+
+    while (!stack.empty() && count < kMaxDuEntries) {
+        std::string cur = std::move(stack.back());
+        stack.pop_back();
+
+        DIR* d = opendir(cur.c_str());
+        if (!d) continue;
+        struct dirent* de;
+        while ((de = readdir(d)) != nullptr && count < kMaxDuEntries) {
+            if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
+            std::string child = cur + "/" + de->d_name;
+            struct stat cst;
+            if (lstat(child.c_str(), &cst) != 0) continue;
+            total += cst.st_size;
+            count++;
+            // 同设备的目录才递归（-x：不跨挂载点）；符号链接到此为止（链接自身已计入）
+            if (S_ISDIR(cst.st_mode) && cst.st_dev == root_dev) {
+                stack.push_back(std::move(child));
+            }
+        }
+        closedir(d);
     }
-    return false;
-}
-
-// ---------- 调用 du -sbx 取路径表观大小（字节）----------
-// -s 汇总；-b 表观大小(字节)；-x 不跨挂载点；timeout 兜底防阻塞主循环。
-// 失败/不可读/超时返回 0。路径来自受信任配置，单引号包裹防 shell 注入。
-unsigned long long du_size(const std::string& path) {
-    char cmd[1280];
-    snprintf(cmd, sizeof(cmd), "timeout 3 du -sbx '%s' 2>/dev/null", path.c_str());
-    FILE* fp = popen(cmd, "r");
-    if (!fp) return 0;
-    char line[256];
-    unsigned long long sz = 0;
-    if (fgets(line, sizeof(line), fp) != nullptr) {
-        sz = strtoull(line, nullptr, 10);   // 输出形如 "123456\t/path"
-    }
-    pclose(fp);
-    return sz;
+    return total;
 }
 
 // ---------- 拍快照：统计触发分区挂载目录下一级子项的占用，取前 N（写入主日志，不另建文件）----------
-// 只看一级子项（如 /userdata 下的 etc/lib/usr/var...），每个子项用 du -sbx 取总大小，
+// 只看一级子项（如 /userdata 下的 etc/lib/usr/var...），每个子项递归遍历取表观总大小，
 // 按大小降序取前 N，不足 N 则有几个报几个。cooldown 按 f_fsid 独立。
 void take_snapshot(const TrackConfig& cfg, const FsInfo& trigger) {
-    if (!cfg.flash_snapshot_on_alert) return;
     long long now = now_ms();
-    long long& last = g_last_snap_ms[trigger.fsid_key];   // 每个分区独立冷却
-    if (now - last < (long long)cfg.flash_snapshot_cooldown * 1000) return;
+    long long& last = state.last_snap_ms[trigger.fsid_key];   // 每个分区独立冷却
+    if (now - last < (long long)cfg.snapshot_cooldown * 1000) return;
     last = now;
 
     struct stat rst;
     bool have_dev = (lstat(trigger.path.c_str(), &rst) == 0);
-    std::vector<std::pair<std::string, unsigned long long>> items;  // 一级子项 -> du -sbx 总大小
+    std::vector<std::pair<std::string, unsigned long long>> items;  // 一级子项 -> 表观总大小(字节)
     if (have_dev) {
         DIR* d = opendir(trigger.path.c_str());
         if (d) {
@@ -143,7 +143,7 @@ void take_snapshot(const TrackConfig& cfg, const FsInfo& trigger) {
                 } else if (!S_ISREG(st.st_mode)) {
                     continue;   // 符号链接/设备/FIFO 等跳过
                 }
-                items.push_back({path, du_size(path)});   // 目录/文件统一用 du -sbx 取大小
+                items.push_back({path, dir_apparent_size(path)});   // 目录/文件统一取表观大小
             }
             closedir(d);
         }
@@ -153,14 +153,13 @@ void take_snapshot(const TrackConfig& cfg, const FsInfo& trigger) {
                  const std::pair<std::string, unsigned long long>& b) {
                   return a.second > b.second;
               });
-    int n = (int)items.size();
-    if (n > cfg.flash_top_n) n = cfg.flash_top_n;   // 不足 N 则有几个报几个
+    int n = clip_top_n((int)items.size(), cfg.snapshot_top_n);   // 不足 N 则有几个报几个
 
     Logger::log(LogLevel::WARN,
         "flash: SNAPSHOT trigger=%s used=%.1f%% thr=%d%% (%lluMB/%lluMB avail=%lluMB) top=%d",
         trigger.path.c_str(), trigger.used_pct, cfg.flash_used_pct_threshold,
         trigger.used_mb, trigger.total_mb, trigger.avail_mb, n);
-    // 各分区整体紧张度由周期概览 maybe_log 负责（告警中自动降到 60s），快照只聚焦 top N 子项排名
+    // 快照只聚焦 top N 子项排名（整体紧张度见告警第2行明细）
     Logger::log(LogLevel::WARN, "flash: SNAP rank sizeMB    path");
     for (int i = 0; i < n; i++) {
         Logger::log(LogLevel::WARN, "flash: SNAP %-4d %9.1f %s", i + 1,
@@ -169,10 +168,9 @@ void take_snapshot(const TrackConfig& cfg, const FsInfo& trigger) {
 }
 
 // ---------- 每 tick：采集所有路径 + 去重告警评估 ----------
-void sample(const TrackConfig& cfg, long long now) {
-    (void)now;
+void sample(const TrackConfig& cfg) {
     std::vector<FsInfo> infos;
-    for (const auto& p : g_paths) {
+    for (const auto& p : state.paths) {
         FsInfo fi;
         if (stat_one(p, fi)) infos.push_back(fi);
     }
@@ -186,39 +184,24 @@ void sample(const TrackConfig& cfg, long long now) {
     for (const auto& kv : rep) {
         const FsInfo& fi = *kv.second;
         if (fi.read_only) continue;   // 只读分区不告警
-        AlertState& st = g_fs_alert[fi.fsid_key];
+        AlertState& st = state.fs_alert[fi.fsid_key];
         bool over = (fi.used_pct > (double)cfg.flash_used_pct_threshold);
-        int ch = eval_alert(st, over, fi.used_pct, cfg.flash_alert_duration);
+        int ch = eval_alert(st, over, fi.used_pct);
         if (ch & 1) {
+            // 刚触发告警：第1行提示 → 第2行该分区明细；快照由下方 active 块统一拍
+            Logger::log(LogLevel::WARN, "flash: flash usage has exceeded the threshold");
             Logger::log(LogLevel::WARN,
-                "flash: ALERT path=%s used=%.1f%% thr=%d%% (%lluMB/%lluMB avail=%lluMB)",
+                "flash: path=%s used=%.1f%% thr=%d%% (%lluMB/%lluMB avail=%lluMB)",
                 fi.path.c_str(), fi.used_pct, cfg.flash_used_pct_threshold,
                 fi.used_mb, fi.total_mb, fi.avail_mb);
-            take_snapshot(cfg, fi);
         } else if (ch & 2) {
             Logger::log(LogLevel::INFO,
                 "flash: RECOVERED path=%s used=%.1f%% thr=%d%% peak=%.1f%%",
                 fi.path.c_str(), fi.used_pct, cfg.flash_used_pct_threshold, st.peak);
         }
-    }
-}
-
-// ---------- 周期概览日志（正常 flash_log_interval / 告警中 60s）----------
-void maybe_log(const TrackConfig& cfg, long long now) {
-    long long interval = any_alert_active() ? 60LL * 1000 : (long long)cfg.flash_log_interval * 1000;
-    if (now - g_last_log_ms < interval) return;
-    g_last_log_ms = now;
-
-    for (const auto& p : g_paths) {
-        FsInfo fi;
-        if (stat_one(p, fi)) {
-            Logger::log(LogLevel::INFO,
-                "flash: %s used=%.1f%% (%lluMB/%lluMB avail=%lluMB)%s",
-                fi.path.c_str(), fi.used_pct,
-                fi.used_mb, fi.total_mb, fi.avail_mb,
-                fi.read_only ? " [read-only]" : "");
-        } else {
-            Logger::log(LogLevel::WARN, "flash: %s statvfs failed", p.c_str());
+        // 告警持续期间（含刚触发）按冷却拍快照（cooldown 按 f_fsid 独立）；恢复后 active 为假即停
+        if (st.active) {
+            take_snapshot(cfg, fi);
         }
     }
 }
@@ -226,30 +209,26 @@ void maybe_log(const TrackConfig& cfg, long long now) {
 } // namespace
 
 void flash_monitor_tick(const TrackConfig& cfg) {
-    if (!cfg.flash_monitor_enable) return;
-    long long now = now_ms();
-    if (!g_inited) {
-        g_inited = true;
-        g_paths = split_ws(cfg.flash_paths);
-        g_last_log_ms = now;
+    if (!state.inited) {
+        state.inited = true;
+        state.paths = split_ws(cfg.flash_paths);
         // 启动行：列出各路径初始状态 + 只读标注
-        for (const auto& p : g_paths) {
+        for (const auto& p : state.paths) {
             FsInfo fi;
             if (stat_one(p, fi)) {
                 Logger::log(LogLevel::INFO,
-                    "flash: %s used=%.1f%% (%lluMB/%lluMB avail=%lluMB) thr=%d%% debounce=%d%s",
+                    "flash: %s used=%.1f%% (%lluMB/%lluMB avail=%lluMB) thr=%d%%%s",
                     fi.path.c_str(), fi.used_pct, fi.used_mb, fi.total_mb, fi.avail_mb,
-                    cfg.flash_used_pct_threshold, cfg.flash_alert_duration,
+                    cfg.flash_used_pct_threshold,
                     fi.read_only ? " [read-only, alerting disabled]" : "");
             } else {
                 Logger::log(LogLevel::WARN, "flash: %s statvfs failed (skipped)", p.c_str());
             }
         }
-        if (g_paths.empty()) {
+        if (state.paths.empty()) {
             Logger::log(LogLevel::WARN, "flash: no flash_paths configured");
         }
         return;
     }
-    sample(cfg, now);
-    maybe_log(cfg, now);
+    sample(cfg);
 }

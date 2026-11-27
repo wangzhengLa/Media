@@ -1,5 +1,6 @@
 #include "config.h"
 #include "logger.h"
+#include "monitor_common.h"
 #include "process_monitor.h"
 #include "cpu_monitor.h"
 #include "mem_monitor.h"
@@ -25,46 +26,18 @@ static void on_signal(int sig) {
     g_stop = 1;
 }
 
-// 获取当前时间戳（毫秒，单调时钟）
-static long long now_ms() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
-
 // ========== 子进程：实际监控逻辑 ==========
 static int child_main(TrackConfig& cfg) {
     // 子进程：设置进程名便于 ps 区分
     prctl(PR_SET_NAME, "track-child", 0, 0, 0);
+    // fork 后重新打开自己的日志 fd：与父进程彻底分离，避免继承同一 fd 表项后
+    // 一方轮转导致另一方的 fd 仍指向旧 inode（写入落到 track.log.1）。
+    // open() 幂等，会先关掉继承来的旧 fd。
+    Logger::init(cfg.log_dir, cfg.log_size_kb, cfg.log_count);
     Logger::log(LogLevel::INFO, "track child start");
 
-    // 打印监控的进程列表
-    for (const auto& p : cfg.processes) {
-        if (p.pidfile.empty()) {
-            Logger::log(LogLevel::INFO, "watch: name=%s comm=%s (no pidfile)",
-                        p.name.c_str(), p.comm.c_str());
-        } else {
-            Logger::log(LogLevel::INFO, "watch: name=%s pidfile=%s comm=%s",
-                        p.name.c_str(), p.pidfile.c_str(), p.comm.c_str());
-        }
-    }
-
-    long long start_ms = now_ms();
-    long long last_heartbeat_ms = 0;
-    long long grace_until = start_ms + (long long)cfg.startup_grace * 1000;
-
-    if (cfg.startup_grace > 0) {
-        Logger::log(LogLevel::INFO, "startup grace: %ds (no restart during this period)",
-                    cfg.startup_grace);
-    }
-
     while (!g_stop) {
-        long long now = now_ms();
-        bool in_grace = (now < grace_until);
-
-        // ---- 1. 进程存活检测 ----
-        std::string heartbeat_str;
-
+        // ---- 1. 进程存活检测：死亡即拉起（无启动宽限期）----
         for (auto& proc : cfg.processes) {
             int pid = 0;
             ProcessState st = check_process(proc, pid);
@@ -73,49 +46,21 @@ static int child_main(TrackConfig& cfg) {
                 proc.last_pid = pid;
                 // 进程稳定运行超过 rapid_death_window，重置崩溃计数
                 reset_crash_count_if_stable(proc, cfg);
-                char tmp[128];
-                snprintf(tmp, sizeof(tmp), "%s=alive(pid=%d) ", proc.name.c_str(), pid);
-                heartbeat_str += tmp;
             } else {
-                char tmp[128];
-                snprintf(tmp, sizeof(tmp), "%s=dead ", proc.name.c_str());
-                heartbeat_str += tmp;
-
-                // 启动宽限期内不拉起，只记录
-                if (in_grace) {
-                    continue;
-                }
-
                 // 拉起（连续崩溃达阈值会在 restart_process 内触发系统重启）
                 restart_process(proc, cfg);
             }
         }
 
-        // ---- 2. 心跳日志 ----
-        if (cfg.heartbeat_interval > 0) {
-            if (now - last_heartbeat_ms >= (long long)cfg.heartbeat_interval * 1000) {
-                double uptime = (now - start_ms) / 1000.0;
-                Logger::log(LogLevel::INFO, "heartbeat: %suptime=%.0fs",
-                            heartbeat_str.c_str(), uptime);
-                last_heartbeat_ms = now;
-            }
-        } else {
-            // 每轮都打
-            double uptime = (now - start_ms) / 1000.0;
-            Logger::log(LogLevel::INFO, "heartbeat: %suptime=%.0fs",
-                        heartbeat_str.c_str(), uptime);
-            last_heartbeat_ms = now;
-        }
-
-        // ---- 3. 资源监控（非阻塞，内部按时间节拍采样）----
+        // ---- 2. 资源监控（非阻塞，内部按时间节拍采样）----
         cpu_monitor_tick(cfg);
         mem_monitor_tick(cfg);
         flash_monitor_tick(cfg);
 
-        // ---- 4. 内核日志采集（读 /proc/kmsg，增量写入 dmesg.log）----
+        // ---- 3. 内核日志采集（读 /proc/kmsg，增量写入 dmesg.log）----
         dmesg_monitor_tick(cfg);
 
-        // ---- 5. sleep ----
+        // ---- 4. sleep ----
         sleep(cfg.check_interval);
     }
 
@@ -142,8 +87,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    Logger::log(LogLevel::INFO, "track start: log_size=%dKB log_count=%d",
-                cfg.log_size_kb, cfg.log_count);
+    Logger::log(LogLevel::INFO, "track start");
 
     // 注册信号（优雅停止）
     signal(SIGTERM, on_signal);
@@ -176,9 +120,9 @@ int main(int argc, char* argv[]) {
 
         // 子进程退出，记录原因
         if (WIFEXITED(status)) {
-            Logger::log(LogLevel::WARN, "child exited, code=%d, respawning", WEXITSTATUS(status));
+            Logger::log(LogLevel::ERROR, "child exited, code=%d, respawning", WEXITSTATUS(status));
         } else if (WIFSIGNALED(status)) {
-            Logger::log(LogLevel::WARN, "child killed by signal %d, respawning", WTERMSIG(status));
+            Logger::log(LogLevel::ERROR, "child killed by signal %d, respawning", WTERMSIG(status));
         }
 
         // 重新 fork 子进程

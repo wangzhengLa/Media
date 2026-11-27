@@ -20,35 +20,17 @@ bool parse_config(const std::string& path, TrackConfig& cfg) {
     cfg.log_size_kb = 1024;
     cfg.log_count = 5;
     cfg.check_interval = 2;
-    cfg.heartbeat_interval = 60;
-    cfg.startup_grace = 15;
     cfg.rapid_death_window = 30;
     cfg.circuit_break_threshold = 3;
+    cfg.snapshot_cooldown = 5;
+    cfg.snapshot_top_n = 5;
     // CPU 监控默认值
-    cfg.cpu_monitor_enable = 1;
-    cfg.cpu_log_interval = 300;
     cfg.cpu_total_threshold = 90;
-    cfg.cpu_alert_duration = 3;
-    cfg.cpu_snapshot_on_alert = 1;
-    cfg.cpu_snapshot_cooldown = 60;
-    cfg.cpu_top_n = 5;
     // 内存监控默认值
-    cfg.mem_monitor_enable = 1;
-    cfg.mem_log_interval = 300;
     cfg.mem_available_threshold_mb = 40;
-    cfg.mem_alert_duration = 5;
-    cfg.mem_snapshot_on_alert = 1;
-    cfg.mem_snapshot_cooldown = 60;
-    cfg.mem_top_n = 5;
     // Flash 监控默认值
-    cfg.flash_monitor_enable = 1;
-    cfg.flash_log_interval = 300;
     cfg.flash_paths = "/userdata /oem";
     cfg.flash_used_pct_threshold = 90;
-    cfg.flash_alert_duration = 2;
-    cfg.flash_snapshot_on_alert = 1;
-    cfg.flash_snapshot_cooldown = 60;
-    cfg.flash_top_n = 5;
     cfg.processes.clear();
 
     std::ifstream f(path);
@@ -104,32 +86,14 @@ bool parse_config(const std::string& path, TrackConfig& cfg) {
             else if (key == "log_size")        cfg.log_size_kb = atoi(val.c_str());
             else if (key == "log_count")       cfg.log_count = atoi(val.c_str());
             else if (key == "check_interval")  cfg.check_interval = atoi(val.c_str());
-            else if (key == "heartbeat_interval") cfg.heartbeat_interval = atoi(val.c_str());
-            else if (key == "startup_grace")      cfg.startup_grace = atoi(val.c_str());
             else if (key == "rapid_death_window") cfg.rapid_death_window = atoi(val.c_str());
             else if (key == "circuit_break_threshold") cfg.circuit_break_threshold = atoi(val.c_str());
-            else if (key == "cpu_monitor_enable")     cfg.cpu_monitor_enable = atoi(val.c_str());
-            else if (key == "cpu_log_interval")       cfg.cpu_log_interval = atoi(val.c_str());
+            else if (key == "snapshot_cooldown") cfg.snapshot_cooldown = atoi(val.c_str());
+            else if (key == "snapshot_top_n")    cfg.snapshot_top_n = atoi(val.c_str());
             else if (key == "cpu_total_threshold")    cfg.cpu_total_threshold = atoi(val.c_str());
-            else if (key == "cpu_alert_duration")     cfg.cpu_alert_duration = atoi(val.c_str());
-            else if (key == "cpu_snapshot_on_alert")  cfg.cpu_snapshot_on_alert = atoi(val.c_str());
-            else if (key == "cpu_snapshot_cooldown")  cfg.cpu_snapshot_cooldown = atoi(val.c_str());
-            else if (key == "cpu_top_n")              cfg.cpu_top_n = atoi(val.c_str());
-            else if (key == "mem_monitor_enable")         cfg.mem_monitor_enable = atoi(val.c_str());
-            else if (key == "mem_log_interval")           cfg.mem_log_interval = atoi(val.c_str());
             else if (key == "mem_available_threshold_mb") cfg.mem_available_threshold_mb = atoi(val.c_str());
-            else if (key == "mem_alert_duration")         cfg.mem_alert_duration = atoi(val.c_str());
-            else if (key == "mem_snapshot_on_alert")      cfg.mem_snapshot_on_alert = atoi(val.c_str());
-            else if (key == "mem_snapshot_cooldown")      cfg.mem_snapshot_cooldown = atoi(val.c_str());
-            else if (key == "mem_top_n")                  cfg.mem_top_n = atoi(val.c_str());
-            else if (key == "flash_monitor_enable")        cfg.flash_monitor_enable = atoi(val.c_str());
-            else if (key == "flash_log_interval")          cfg.flash_log_interval = atoi(val.c_str());
             else if (key == "flash_paths")                 cfg.flash_paths = val;
             else if (key == "flash_used_pct_threshold")    cfg.flash_used_pct_threshold = atoi(val.c_str());
-            else if (key == "flash_alert_duration")        cfg.flash_alert_duration = atoi(val.c_str());
-            else if (key == "flash_snapshot_on_alert")     cfg.flash_snapshot_on_alert = atoi(val.c_str());
-            else if (key == "flash_snapshot_cooldown")     cfg.flash_snapshot_cooldown = atoi(val.c_str());
-            else if (key == "flash_top_n")                 cfg.flash_top_n = atoi(val.c_str());
         }
     }
 

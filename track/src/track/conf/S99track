@@ -1,0 +1,66 @@
+#!/bin/sh
+# S99track - 系统track守护进程
+# 监控关键进程存活，异常时自动拉起
+# 存活保障：父进程 waitpid —— 子进程崩溃，父进程立即重启
+
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+export PATH
+
+BIN=/usr/bin/track
+CONF=/etc/track/track.conf
+PIDFILE=/var/run/track.pid
+
+start() {
+    mkdir -p /var/run 2>/dev/null
+
+    # 已在运行则不重复启动
+    if pidof track >/dev/null 2>&1; then
+        echo "track already running (pids: $(pidof track))"
+        return 0
+    fi
+
+    echo "Starting track..."
+    $BIN &
+    track_pid=$!
+    echo "$track_pid" > "$PIDFILE"
+
+    sleep 1
+    if kill -0 "$track_pid" 2>/dev/null; then
+        echo "track started (pid $track_pid)"
+    else
+        echo "track failed to start"
+        rm -f "$PIDFILE"
+        return 1
+    fi
+}
+
+stop() {
+    if pidof track >/dev/null 2>&1; then
+        echo "Stopping track..."
+        killall -TERM track 2>/dev/null
+        sleep 1
+        killall -KILL track 2>/dev/null
+    fi
+    rm -f "$PIDFILE"
+    echo "track stopped"
+}
+
+status() {
+    if pidof track >/dev/null 2>&1; then
+        echo "track running (pids: $(pidof track))"
+        return 0
+    fi
+    echo "track stopped"
+    return 3
+}
+
+case "$1" in
+    start)   start ;;
+    stop)    stop ;;
+    restart) stop; start ;;
+    status)  status ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 2
+        ;;
+esac

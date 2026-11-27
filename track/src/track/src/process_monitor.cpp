@@ -1,5 +1,6 @@
 #include "process_monitor.h"
 #include "logger.h"
+#include "monitor_common.h"
 
 #include <cstdio>
 #include <cstring>
@@ -95,13 +96,6 @@ ProcessState check_process(const ProcessConfig& proc, int& out_pid) {
     return ProcessState::DEAD;
 }
 
-// 获取当前时间戳（毫秒）
-static long long now_ms() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
-
 int restart_process(ProcessConfig& proc, const TrackConfig& cfg) {
     // 每次重启都计数（不管之前是否"成功"拉起）
     proc.crash_count++;
@@ -123,9 +117,6 @@ int restart_process(ProcessConfig& proc, const TrackConfig& cfg) {
 
     // 固定延迟，不做指数退避
     int delay = proc.restart_delay;
-
-    Logger::log(LogLevel::INFO, "restarting '%s' (attempt %d, delay=%ds)",
-                proc.name.c_str(), proc.crash_count, delay);
 
     // 执行拉起命令
     int ret = system(proc.restart_cmd.c_str());
@@ -159,7 +150,5 @@ void reset_crash_count_if_stable(ProcessConfig& proc, const TrackConfig& cfg) {
     long long now = now_ms();
     if (now - proc.last_restart_ms >= (long long)cfg.rapid_death_window * 1000) {
         proc.crash_count = 0;
-        Logger::log(LogLevel::INFO, "'%s' stable for %ds, crash_count reset",
-                    proc.name.c_str(), cfg.rapid_death_window);
     }
 }

@@ -2,46 +2,40 @@
 #define TRACK_MONITOR_COMMON_H
 
 // CPU / 内存 / Flash 监控共用的基础设施：
-//   - AlertState + eval_alert：对称去抖（告警/恢复同一阈值次数）
+//   - AlertState + eval_alert：告警边沿检测（超阈值即告警、低于阈值即恢复）
 //   - read_pid_stat：解析 /proc/<pid>/stat（comm/state/utime/stime/threads/rss）
-// 这两个实现从 cpu_monitor.cpp 原样提取，行为保持不变；仅改为 inline 以支持多编译单元共享。
+//   - now_ms：单调时钟毫秒（CLOCK_MONOTONIC，不受 wall clock 回拨影响）
+//   - clip_top_n：快照 TOP N 裁剪（不足 N 则有几个报几个）
+// 均为 inline，多编译单元共享无链接冲突；行为与原各模块内的实现完全一致。
 
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
 #include <cstddef>
+#include <ctime>
 
 // 告警状态（单个 trigger）
 struct AlertState {
     bool active = false;
-    int strike = 0;
-    int recover = 0;
-    double peak = 0;   // 告警期间记录的极值（CPU/Flash 用 max；内存如需 min 请自行维护）
+    double peak = 0;   // 告警期间记录的极值（CPU/Flash 用 max；内存最小值在 mem 模块自行维护）
 };
 
-// 去抖评估：返回位 0=刚告警, 位 1=刚恢复
-inline int eval_alert(AlertState& st, bool over, double val, int duration) {
+// 告警边沿评估：返回位 0=刚告警(active 0→1)，位 1=刚恢复(active 1→0)。
+// 无去抖：超阈值即告警、低于阈值即恢复；告警期间持续更新 peak 极值。
+inline int eval_alert(AlertState& st, bool over, double val) {
     int changed = 0;
     if (over) {
-        st.recover = 0;
         if (!st.active) {
-            st.strike++;
-            if (st.strike >= duration) {
-                st.active = true;
-                st.peak = val;
-                changed |= 1;
-            }
+            st.active = true;
+            st.peak = val;
+            changed |= 1;
         } else if (val > st.peak) {
             st.peak = val;
         }
     } else {
-        st.strike = 0;
         if (st.active) {
-            st.recover++;
-            if (st.recover >= duration) {
-                st.active = false;
-                changed |= 2;
-            }
+            st.active = false;
+            changed |= 2;
         }
     }
     return changed;
@@ -94,6 +88,18 @@ inline bool read_pid_stat(int pid, char* comm, size_t comm_sz,
     if (rss_pages) *rss_pages = rss;
     if (state_out) *state_out = st[0];
     return true;
+}
+
+// 单调时钟毫秒（CLOCK_MONOTONIC）。设备无 RTC / wall clock 停在 1970，计时必须用单调钟。
+inline long long now_ms() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+// 快照 TOP N 裁剪：取 min(size, top_n)，不足 N 则有几个报几个。
+inline int clip_top_n(int size, int top_n) {
+    return (size > top_n) ? top_n : size;
 }
 
 #endif // TRACK_MONITOR_COMMON_H
